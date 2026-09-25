@@ -231,24 +231,12 @@ enum ShortcutTranslate {
     }
 }
 
-/// Поле перевода. Без меню «Правка» у агента Cmd+A само не доходит.
-final class TranslateTextView: NSTextView {
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if flags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "a" {
-            selectAll(nil)
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
-    }
-}
-
 /// Два окна: слева английский, справа русский. Пишешь в одно — перевод сам падает в другое.
 final class TranslatorView: NSView {
     private let englishScroll = NSScrollView()
     private let russianScroll = NSScrollView()
-    private let english: TranslateTextView
-    private let russian: TranslateTextView
+    private let english: NSTextView
+    private let russian: NSTextView
     private let englishMark = UtkaChrome.label("En", size: 11, weight: .semibold, color: UtkaChrome.dim)
     private let russianMark = UtkaChrome.label("Ru", size: 11, weight: .semibold, color: UtkaChrome.dim)
     private let status = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
@@ -261,8 +249,8 @@ final class TranslatorView: NSView {
     }
 
     override init(frame frameRect: NSRect) {
-        english = TranslateTextView()
-        russian = TranslateTextView()
+        english = NSTextView()
+        russian = NSTextView()
         super.init(frame: frameRect)
         mount(english, in: englishScroll)
         mount(russian, in: russianScroll)
@@ -280,16 +268,6 @@ final class TranslatorView: NSView {
     }
 
     required init?(coder: NSCoder) { nil }
-
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if flags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "a",
-           let text = window?.firstResponder as? NSTextView {
-            text.selectAll(nil)
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
-    }
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
         super.resizeSubviews(withOldSize: oldSize)
@@ -312,14 +290,20 @@ final class TranslatorView: NSView {
         text.autoresizingMask = [.width]
         text.textContainer?.widthTracksTextView = true
         scroll.drawsBackground = false
+        scroll.borderType = .noBorder
         scroll.hasVerticalScroller = true
+        scroll.wantsLayer = true
+        scroll.layer?.cornerRadius = 12
+        scroll.layer?.masksToBounds = true
+        scroll.contentView.drawsBackground = false
         scroll.documentView = text
     }
 
     private func style(_ text: NSTextView) {
         text.font = UtkaChrome.font(13)
         text.textColor = .white
-        text.backgroundColor = NSColor.white.withAlphaComponent(0.06)
+        text.drawsBackground = true
+        text.backgroundColor = NSColor(white: 0.045, alpha: 1)
         text.insertionPointColor = .white
         text.isRichText = false
         text.isEditable = true

@@ -33,6 +33,37 @@ final class KeyPanel: NSPanel {
         }
         super.sendEvent(event)
     }
+
+    /// Правка без меню «Правка». Код клавиши, не буква: на русской раскладке Cmd+A иначе пищит.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if performEditShortcut(event) { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    private func performEditShortcut(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags.contains(.command), !flags.contains(.option), !flags.contains(.control) else { return false }
+        guard let text = firstResponder as? NSTextView else { return false }
+        switch event.keyCode {
+        case 0:
+            text.selectAll(nil)
+        case 8:
+            text.copy(nil)
+        case 7:
+            text.cut(nil)
+        case 9:
+            text.paste(nil)
+        case 6:
+            if flags.contains(.shift) {
+                text.undoManager?.redo()
+            } else {
+                text.undoManager?.undo()
+            }
+        default:
+            return false
+        }
+        return true
+    }
 }
 
 /// Чёрная капля: верхние углы выпуклые, плашка шире книзу и держится за кромку.
