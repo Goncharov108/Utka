@@ -10,6 +10,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var presetsView: PresetsView!
     private var statusItem: NSStatusItem!
     private var toggleItem: NSMenuItem!
+    private let shotPicker = ShotPicker()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let support = UtkaPaths.support
@@ -30,6 +31,8 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.onSection = { [weak self] section in
             if section == .presets { self?.presetsView.refresh() }
         }
+        shotPicker.onDone = { [weak self] in self?.hover.suspended = false }
+        panel.onCapture = { [weak self] in self?.captureRegion() }
         shelfView.onDrag = { [weak self] active in self?.hover.suspended = active }
         presetsView.onDrag = { [weak self] active in self?.hover.suspended = active }
         hover.extraHitRect = { [weak self] in
@@ -94,6 +97,16 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggleItem.state = hover.enabled ? .on : .off
         statusItem.button?.appearsDisabled = !hover.enabled
         if !hover.enabled { panel.hide() }
+    }
+
+    /// Своя рамка на всех экранах. Системный жест из утки не доходит до macOS.
+    private func captureRegion() {
+        hover.suspended = true
+        hover.markClosed()
+        panel.hide()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            self?.shotPicker.begin()
+        }
     }
 
     @objc private func sectionClicked(_ sender: NSButton) {

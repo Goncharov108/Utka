@@ -23,6 +23,14 @@ final class HoverMonitor {
         return CGRect(x: frame.midX - width / 2, y: frame.maxY - height, width: width, height: height + 4)
     }
 
+    /// Окно уже убрано с экрана. Иначе курсор у верхнего края не откроет его снова.
+    func markClosed() {
+        open = false
+        insideSince = nil
+        outsideSince = nil
+        activeFrame = nil
+    }
+
     func start() {
         guard timer == nil else { return }
         let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in

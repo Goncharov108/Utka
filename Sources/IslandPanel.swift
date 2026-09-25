@@ -124,10 +124,19 @@ final class IslandRoot: NSView {
     }
 }
 
+/// Цель кнопки снимка: сама панель не наследник NSObject.
+private final class ShotButtonTarget: NSObject {
+    var fire: () -> Void = {}
+    @objc func take() { fire() }
+}
+
 /// Островок у верхнего края выбранного экрана.
 final class IslandPanel {
     let window: KeyPanel
-    private let titleLabel = UtkaChrome.label("Полка", size: 15, weight: .semibold)
+    /// Верхняя полоса на все разделы. Сюда сядут кнопки, подпись раздела не нужна.
+    private let topBar = NSView()
+    private let shotButton = NSButton()
+    private let shotTarget = ShotButtonTarget()
     private let body = NSView()
     private let buttons: [NSButton]
     private let sections: [NSView]
@@ -138,6 +147,7 @@ final class IslandPanel {
     private var slideStart: Date?
     private var slideOrderOut = false
     var onSection: ((IslandSection) -> Void)?
+    var onCapture: (() -> Void)?
 
     init(shelf: NSView, clipboard: NSView, presets: NSView, translator: NSView, mark: NSImage?) {
         sections = [shelf, clipboard, presets, translator]
@@ -186,8 +196,21 @@ final class IslandPanel {
         }
         buttons = made
 
+        shotButton.isBordered = false
+        shotButton.imagePosition = .imageOnly
+        shotButton.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Снимок области")?
+            .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
+        shotButton.contentTintColor = .white
+        shotButton.wantsLayer = true
+        shotButton.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        shotButton.layer?.cornerRadius = 14
+        shotButton.toolTip = "Снимок области"
+        shotTarget.fire = { [weak self] in self?.onCapture?() }
+        shotButton.target = shotTarget
+        shotButton.action = #selector(ShotButtonTarget.take)
+        topBar.addSubview(shotButton)
         root.addSubview(rail)
-        root.addSubview(titleLabel)
+        root.addSubview(topBar)
         root.addSubview(body)
         showSection(.shelf)
 
@@ -200,14 +223,17 @@ final class IslandPanel {
                 button.frame = NSRect(x: 46, y: y, width: 36, height: 36)
                 y -= 42
             }
-            self.titleLabel.frame = NSRect(x: 96, y: root.bounds.height - 36, width: root.bounds.width - 112, height: 22)
             let bottom: CGFloat = 14
             let right: CGFloat = 48
+            let barH: CGFloat = 32
+            self.topBar.frame = NSRect(x: 96, y: root.bounds.height - 12 - barH, width: max(120, root.bounds.width - 96 - right), height: barH)
+            self.shotButton.frame = NSRect(x: self.topBar.bounds.width - 32, y: 2, width: 28, height: 28)
+            let bodyTop = root.bounds.height - 12 - barH - 8
             self.body.frame = NSRect(
                 x: 96,
                 y: bottom,
                 width: max(120, root.bounds.width - 96 - right),
-                height: max(80, root.bounds.height - bottom - 48)
+                height: max(80, bodyTop - bottom)
             )
             if let visible = self.body.subviews.first {
                 visible.frame = self.body.bounds
@@ -284,7 +310,6 @@ final class IslandPanel {
 
     private func showSection(_ section: IslandSection) {
         current = section
-        titleLabel.stringValue = section.title
         body.subviews.forEach { $0.removeFromSuperview() }
         let view = sections[section.rawValue]
         view.frame = body.bounds
