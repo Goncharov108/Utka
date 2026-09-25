@@ -13,8 +13,7 @@ final class ShelfModel {
     var onChange: (() -> Void)?
 
     private let storeURL: URL
-    private var watchSource: DispatchSourceFileSystemObject?
-    private var watchFD: Int32 = -1
+    private var watchers: [(source: DispatchSourceFileSystemObject, fd: Int32)] = []
     private var knownShots: Set<String> = []
     private var scanTimer: Timer?
 
@@ -43,6 +42,9 @@ final class ShelfModel {
     }
 
     func remove(id: String) {
+        if let record = records.first(where: { $0.id == id }), isOwnedShot(record.path) {
+            try? FileManager.default.removeItem(atPath: record.path)
+        }
         records.removeAll { $0.id == id }
         save()
         onChange?()
@@ -59,52 +61,121 @@ final class ShelfModel {
         return nil
     }
 
-    /// Новые скриншоты после запуска сами садятся на полку.
+    /// Новые скриншоты пишутся в папку утки, а не на стол. Удаление карточки стирает файл.
     func startScreenshotWatch() {
-        guard watchSource == nil else { return }
-        let dir = screenshotDirectory()
-        knownShots = Set(imageFiles(in: dir).map(\.path))
+        guard watchers.isEmpty else { return }
+        let shots = shotsDirectory()
+        try? FileManager.default.createDirectory(at: shots, withIntermediateDirectories: true)
+        retargetScreenshotCapture(to: shots)
+        relocateDesktopShots()
+        knownShots = Set(imageFiles(in: shots).map(\.path))
+        watch(shots)
+        watch(desktopDirectory())
+    }
+
+    private func scheduleScan() {
+        scanTimer?.invalidate()
+        scanShots()
+    }
+
+    private func scanShots() {
+        var fresh: [URL] = []
+        for url in imageFiles(in: shotsDirectory()) where !knownShots.contains(url.path) {
+            knownShots.insert(url.path)
+            fresh.append(url)
+        }
+        for url in imageFiles(in: desktopDirectory()) where isScreenshotName(url.lastPathComponent) && !knownShots.contains(url.path) {
+            guard let moved = moveIntoShots(url) else { continue }
+            knownShots.insert(moved.path)
+            fresh.append(moved)
+        }
+        guard !fresh.isEmpty else { return }
+        add(urls: fresh)
+    }
+
+    /// Куда macOS кладёт новые снимки экрана.
+    private func shotsDirectory() -> URL {
+        UtkaPaths.support.appendingPathComponent("Shots", isDirectory: true)
+    }
+
+    private func desktopDirectory() -> URL {
+        FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0]
+    }
+
+    private func isOwnedShot(_ path: String) -> Bool {
+        let root = shotsDirectory().path
+        return path == root || path.hasPrefix(root + "/")
+    }
+
+    private func isScreenshotName(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        return lower.hasPrefix("снимок экрана") || lower.hasPrefix("screenshot") || lower.hasPrefix("screen shot")
+    }
+
+    /// Уже лежащие на столе снимки с полки уезжают в папку утки.
+    private func relocateDesktopShots() {
+        let desktop = desktopDirectory().path
+        var changed = false
+        for index in records.indices {
+            let path = records[index].path
+            guard path.hasPrefix(desktop + "/"), isScreenshotName((path as NSString).lastPathComponent) else { continue }
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            guard let moved = moveIntoShots(URL(fileURLWithPath: path)) else { continue }
+            records[index].path = moved.path
+            records[index].name = moved.lastPathComponent
+            if let data = BookmarkStore.data(for: moved) {
+                records[index].bookmark = data.base64EncodedString()
+            }
+            changed = true
+        }
+        guard changed else { return }
+        save()
+        onChange?()
+    }
+
+    private func moveIntoShots(_ url: URL) -> URL? {
+        let dir = shotsDirectory()
+        if url.path.hasPrefix(dir.path + "/") { return url }
+        var dest = dir.appendingPathComponent(url.lastPathComponent)
+        if FileManager.default.fileExists(atPath: dest.path) {
+            dest = dir.appendingPathComponent(UUID().uuidString + "-" + url.lastPathComponent)
+        }
+        do {
+            try FileManager.default.moveItem(at: url, to: dest)
+            return dest
+        } catch {
+            return nil
+        }
+    }
+
+    /// Снимки пишутся сразу в папку утки, без плашки в углу экрана.
+    private func retargetScreenshotCapture(to dir: URL) {
+        var domain = UserDefaults.standard.persistentDomain(forName: "com.apple.screencapture") ?? [:]
+        let already = (domain["location"] as? String) == dir.path && (domain["show-thumbnail"] as? Bool) == false
+        guard !already else { return }
+        domain["location"] = dir.path
+        domain["show-thumbnail"] = false
+        UserDefaults.standard.setPersistentDomain(domain, forName: "com.apple.screencapture")
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        task.arguments = ["screencaptureui"]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+    }
+
+    private func watch(_ dir: URL) {
         let fd = Darwin.open(dir.path, O_EVTONLY)
         guard fd >= 0 else { return }
-        watchFD = fd
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
             eventMask: [.write, .rename, .link],
             queue: .main
         )
         source.setEventHandler { [weak self] in self?.scheduleScan() }
-        source.setCancelHandler { [weak self] in
-            if let fd = self?.watchFD, fd >= 0 { Darwin.close(fd) }
-        }
+        source.setCancelHandler { Darwin.close(fd) }
         source.resume()
-        watchSource = source
-    }
-
-    private func scheduleScan() {
-        scanTimer?.invalidate()
-        scanTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
-            self?.scanShots()
-        }
-    }
-
-    private func scanShots() {
-        let fresh = imageFiles(in: screenshotDirectory()).filter { !knownShots.contains($0.path) }
-        guard !fresh.isEmpty else { return }
-        fresh.forEach { knownShots.insert($0.path) }
-        add(urls: fresh)
-    }
-
-    private func screenshotDirectory() -> URL {
-        if let domain = UserDefaults.standard.persistentDomain(forName: "com.apple.screencapture"),
-           let location = domain["location"] as? String,
-           !location.isEmpty {
-            let expanded = (location as NSString).expandingTildeInPath
-            var isDir: ObjCBool = false
-            if FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir), isDir.boolValue {
-                return URL(fileURLWithPath: expanded, isDirectory: true)
-            }
-        }
-        return FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0]
+        watchers.append((source, fd))
     }
 
     private func imageFiles(in dir: URL) -> [URL] {
