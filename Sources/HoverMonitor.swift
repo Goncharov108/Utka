@@ -17,10 +17,10 @@ final class HoverMonitor {
     /// Полоса по центру верхнего края. Не захватывает меню Apple и часы.
     static func zone(for screen: NSScreen) -> CGRect {
         let frame = screen.frame
-        let bar = frame.maxY - screen.visibleFrame.maxY
-        let height = min(max(bar, 22), 36)
-        let width: CGFloat = 220
-        return CGRect(x: frame.midX - width / 2, y: frame.maxY - height, width: width, height: height)
+        let height: CGFloat = 120
+        let width = min(max(screen.frame.width * 0.45, 480), 900)
+        // contains() не включает верхнюю границу, поэтому самый край экрана в зону не попадал.
+        return CGRect(x: frame.midX - width / 2, y: frame.maxY - height, width: width, height: height + 4)
     }
 
     func start() {
@@ -76,7 +76,7 @@ final class HoverMonitor {
             return
         }
         if outsideSince == nil { outsideSince = Date() }
-        if let since = outsideSince, Date().timeIntervalSince(since) >= 0.4 {
+        if let since = outsideSince, Date().timeIntervalSince(since) >= 0.9 {
             open = false
             outsideSince = nil
             activeFrame = nil

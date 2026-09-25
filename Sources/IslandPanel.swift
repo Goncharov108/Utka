@@ -35,9 +35,62 @@ final class KeyPanel: NSPanel {
     }
 }
 
-/// Тёмная подложка островка.
-final class IslandRoot: NSVisualEffectView {
+/// Чёрная капля: верхние углы выпуклые, плашка шире книзу и держится за кромку.
+final class IslandRoot: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func layout() {
+        super.layout()
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.cgColor
+        let mask = (layer?.mask as? CAShapeLayer) ?? CAShapeLayer()
+        mask.frame = bounds
+        mask.path = islandSilhouette(bounds: bounds, radius: 36)
+        mask.contentsScale = window?.backingScaleFactor ?? 2
+        layer?.mask = mask
+    }
+
+    /// Уши на всю кромку, плечо вогнуто внутрь, низ скруглён.
+    private func islandSilhouette(bounds: CGRect, radius: CGFloat) -> CGPath {
+        let width = bounds.width
+        let height = bounds.height
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: 0, y: height))
+        path.addLine(to: CGPoint(x: width, y: height))
+        path.addArc(
+            center: CGPoint(x: width, y: height - radius),
+            radius: radius,
+            startAngle: .pi / 2,
+            endAngle: .pi,
+            clockwise: false
+        )
+        path.addLine(to: CGPoint(x: width - radius, y: radius))
+        path.addArc(
+            center: CGPoint(x: width - radius * 2, y: radius),
+            radius: radius,
+            startAngle: 0,
+            endAngle: -.pi / 2,
+            clockwise: true
+        )
+        path.addLine(to: CGPoint(x: radius * 2, y: 0))
+        path.addArc(
+            center: CGPoint(x: radius * 2, y: radius),
+            radius: radius,
+            startAngle: -.pi / 2,
+            endAngle: .pi,
+            clockwise: true
+        )
+        path.addLine(to: CGPoint(x: radius, y: height - radius))
+        path.addArc(
+            center: CGPoint(x: 0, y: height - radius),
+            radius: radius,
+            startAngle: 0,
+            endAngle: .pi / 2,
+            clockwise: false
+        )
+        path.closeSubpath()
+        return path
+    }
 }
 
 /// Островок у верхнего края выбранного экрана.
@@ -48,12 +101,17 @@ final class IslandPanel {
     private let buttons: [NSButton]
     private let sections: [NSView]
     private var current: IslandSection = .shelf
+    private var slideTimer: Timer?
+    private var slideFrom: CGRect = .zero
+    private var slideTo: CGRect = .zero
+    private var slideStart: Date?
+    private var slideOrderOut = false
     var onSection: ((IslandSection) -> Void)?
 
     init(shelf: NSView, clipboard: NSView, presets: NSView, translator: NSView, mark: NSImage?) {
         sections = [shelf, clipboard, presets, translator]
         let panel = KeyPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 600, height: 340),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 280),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -61,7 +119,7 @@ final class IslandPanel {
         panel.title = "Утка"
         panel.identifier = NSUserInterfaceItemIdentifier("utka.island")
         panel.isFloatingPanel = true
-        panel.level = .statusBar
+        panel.level = .popUpMenu
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -73,18 +131,12 @@ final class IslandPanel {
         window = panel
 
         let root = IslandRoot()
-        root.material = .hudWindow
-        root.blendingMode = .behindWindow
-        root.state = .active
         root.wantsLayer = true
-        root.layer?.cornerRadius = 18
-        root.layer?.masksToBounds = true
         panel.contentView = root
 
         let rail = NSView()
-        let markView = NSImageView()
-        markView.image = mark
-        markView.imageScaling = .scaleProportionallyUpOrDown
+        let markView = DuckMarkView()
+        markView.image = mark.map { MenuMark.cutout(from: $0) }
         rail.addSubview(markView)
 
         var made: [NSButton] = []
@@ -110,19 +162,21 @@ final class IslandPanel {
 
         root.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: root, queue: .main) { _ in
-            rail.frame = NSRect(x: 0, y: 0, width: 58, height: root.bounds.height)
-            markView.frame = NSRect(x: 13, y: root.bounds.height - 46, width: 32, height: 32)
-            var y = root.bounds.height - 92
+            rail.frame = NSRect(x: 0, y: 0, width: 88, height: root.bounds.height)
+            markView.frame = NSRect(x: 44, y: root.bounds.height - 86, width: 40, height: 40)
+            var y = root.bounds.height - 132
             for button in made {
-                button.frame = NSRect(x: 11, y: y, width: 36, height: 36)
+                button.frame = NSRect(x: 46, y: y, width: 36, height: 36)
                 y -= 42
             }
-            self.titleLabel.frame = NSRect(x: 74, y: root.bounds.height - 36, width: root.bounds.width - 90, height: 22)
-            self.body.frame = NSRect(x: 70, y: 12, width: root.bounds.width - 82, height: root.bounds.height - 52)
+            self.titleLabel.frame = NSRect(x: 96, y: root.bounds.height - 36, width: root.bounds.width - 112, height: 22)
+            self.body.frame = NSRect(x: 96, y: 12, width: root.bounds.width - 108, height: root.bounds.height - 52)
             if let visible = self.body.subviews.first {
                 visible.frame = self.body.bounds
+                visible.resizeSubviews(withOldSize: visible.bounds.size)
             }
         }
+        NotificationCenter.default.post(name: NSView.frameDidChangeNotification, object: root)
     }
 
     func bindActions(target: AnyObject, action: Selector) {
@@ -133,29 +187,56 @@ final class IslandPanel {
     }
 
     func show(on screen: NSScreen) {
-        let frame = frame(on: screen)
-        if window.isVisible && roughly(window.frame, frame) { return }
-        let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        window.setFrame(frame.offsetBy(dx: 0, dy: 8), display: false)
-        window.alphaValue = 0
-        if !window.isVisible { window.orderFrontRegardless() }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = reduce ? 0 : 0.18
-            window.animator().setFrame(frame, display: true)
-            window.animator().alphaValue = 1
+        let target = frame(on: screen)
+        if window.isVisible && roughly(window.frame, target) && slideTimer == nil { return }
+        let tucked = CGRect(x: target.minX, y: screen.frame.maxY, width: target.width, height: target.height)
+        window.alphaValue = 1
+        if !window.isVisible {
+            window.setFrame(tucked, display: false)
+            window.orderFrontRegardless()
         }
+        slide(from: window.frame, to: target, orderOut: false)
     }
 
     func hide() {
         guard window.isVisible else { return }
-        let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = reduce ? 0 : 0.15
-            window.animator().alphaValue = 0
-        }, completionHandler: { [weak window] in
-            window?.orderOut(nil)
-            window?.alphaValue = 1
-        })
+        let frame = window.frame
+        let top = (window.screen ?? NSScreen.main)?.frame.maxY ?? frame.maxY
+        let tucked = CGRect(x: frame.minX, y: top, width: frame.width, height: frame.height)
+        slide(from: frame, to: tucked, orderOut: true)
+    }
+
+    /// Выезд из-за кромки. Аниматор окна у неактивного агента не тикает, поэтому кадры сами.
+    private func slide(from: CGRect, to: CGRect, orderOut: Bool) {
+        slideTimer?.invalidate()
+        slideFrom = from
+        slideTo = to
+        slideStart = Date()
+        slideOrderOut = orderOut
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            self?.stepSlide(timer)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        slideTimer = timer
+    }
+
+    private func stepSlide(_ timer: Timer) {
+        let duration = 0.42
+        let elapsed = Date().timeIntervalSince(slideStart ?? Date())
+        let progress = min(1, elapsed / duration)
+        let eased = 1 - pow(1 - progress, 3)
+        let frame = CGRect(
+            x: slideFrom.minX + (slideTo.minX - slideFrom.minX) * eased,
+            y: slideFrom.minY + (slideTo.minY - slideFrom.minY) * eased,
+            width: slideFrom.width + (slideTo.width - slideFrom.width) * eased,
+            height: slideFrom.height + (slideTo.height - slideFrom.height) * eased
+        )
+        window.setFrame(frame, display: true)
+        if progress >= 1 {
+            timer.invalidate()
+            slideTimer = nil
+            if slideOrderOut { window.orderOut(nil) }
+        }
     }
 
     func select(_ section: IslandSection) {
@@ -179,8 +260,8 @@ final class IslandPanel {
 
     private func frame(on screen: NSScreen) -> CGRect {
         let limit = screen.frame.insetBy(dx: 8, dy: 8)
-        let width = min(600, limit.width)
-        let height = min(340, limit.height)
+        let width = min(720, limit.width)
+        let height = min(280, limit.height)
         return CGRect(x: screen.frame.midX - width / 2, y: screen.frame.maxY - height, width: width, height: height)
     }
 

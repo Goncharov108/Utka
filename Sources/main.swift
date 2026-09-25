@@ -66,6 +66,9 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggleItem = NSMenuItem(title: "Включена", action: #selector(toggleEnabled), keyEquivalent: "")
         toggleItem.target = self
         menu.addItem(toggleItem)
+        let show = NSMenuItem(title: "Показать", action: #selector(showNow), keyEquivalent: "")
+        show.target = self
+        menu.addItem(show)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Выход", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
@@ -75,6 +78,14 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         toggleItem.state = hover.enabled ? .on : .off
         statusItem.button?.appearsDisabled = !hover.enabled
+    }
+
+    @objc private func showNow() {
+        let point = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main
+        guard let screen else { return }
+        hover.enabled = true
+        panel.show(on: screen)
     }
 
     @objc private func toggleEnabled() {
@@ -115,10 +126,11 @@ enum SelfCheck {
         for screen in screens {
             let zone = HoverMonitor.zone(for: screen)
             print("screen \(screen.localizedName) frame \(screen.frame) zone \(zone)")
-            if !screen.frame.contains(zone) { fail("зона вне экрана \(screen.localizedName)") }
+            let body = zone.insetBy(dx: 0, dy: 4)
+            if !screen.frame.contains(body) { fail("зона вне экрана \(screen.localizedName)") }
             if abs(zone.midX - screen.frame.midX) > 1 { fail("зона не по центру") }
-            if abs(zone.maxY - screen.frame.maxY) > 1 { fail("зона не у верхнего края") }
-            if abs(zone.width - 220) > 1 { fail("ширина зоны") }
+            if zone.maxY < screen.frame.maxY { fail("зона не у верхнего края") }
+            if zone.width < 480 { fail("ширина зоны \(zone.width)") }
         }
     }
 

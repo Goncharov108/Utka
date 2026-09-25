@@ -231,21 +231,39 @@ final class TextRowView: NSView {
     }
 }
 
+/// Марка в панели: рисуется целиком, без уменьшения в крошечный квадрат.
+final class DuckMarkView: NSView {
+    var image: NSImage? { didSet { needsDisplay = true } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSGraphicsContext.current?.imageInterpolation = .high
+        image?.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
+    }
+}
+
 /// Силуэт марки для строки меню: система сама красит его под тему.
 enum MenuMark {
-    static func template(from image: NSImage) -> NSImage {
-        let side = 160
+    /// Белая утка без чёрного квадрата, в полном размере исходника.
+    static func cutout(from image: NSImage) -> NSImage {
+        let side = 512
         guard let canvas = bitmap(side, side) else { return image }
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: canvas)
+        NSGraphicsContext.current?.imageInterpolation = .high
         image.draw(in: NSRect(x: 0, y: 0, width: side, height: side))
         NSGraphicsContext.restoreGraphicsState()
-        guard let box = inkBox(canvas), let cropped = cropInk(canvas, box: box) else { return image }
-        let duck = NSImage(size: cropped.size)
+        guard let box = inkBox(canvas), let cropped = cropInk(canvas, box: box, smooth: true) else { return image }
+        let duck = NSImage(size: NSSize(width: cropped.pixelsWide, height: cropped.pixelsHigh))
         duck.addRepresentation(cropped)
+        return duck
+    }
+
+    static func template(from image: NSImage) -> NSImage {
+        let duck = cutout(from: image)
         let result = NSImage(size: NSSize(width: 18, height: 18))
         result.lockFocus()
-        duck.draw(in: NSRect(x: 1, y: 1, width: 16, height: 16))
+        NSGraphicsContext.current?.imageInterpolation = .high
+        duck.draw(in: NSRect(x: 0, y: 0, width: 18, height: 18))
         result.unlockFocus()
         result.isTemplate = true
         return result
@@ -296,7 +314,7 @@ enum MenuMark {
         return (minX, minY, maxX, maxY)
     }
 
-    private static func cropInk(_ source: NSBitmapImageRep, box: (Int, Int, Int, Int)) -> NSBitmapImageRep? {
+    private static func cropInk(_ source: NSBitmapImageRep, box: (Int, Int, Int, Int), smooth: Bool = false) -> NSBitmapImageRep? {
         let pad = 6
         let minX = max(0, box.0 - pad)
         let minY = max(0, box.1 - pad)
@@ -311,18 +329,12 @@ enum MenuMark {
             for x in 0..<w {
                 let si = (minY + y) * sbpr + (minX + x) * 4
                 let di = y * dbpr + x * 4
-                let sum = Int(src[si]) + Int(src[si + 1]) + Int(src[si + 2])
-                if sum > 500 {
-                    dst[di] = 0
-                    dst[di + 1] = 0
-                    dst[di + 2] = 0
-                    dst[di + 3] = 255
-                } else {
-                    dst[di] = 0
-                    dst[di + 1] = 0
-                    dst[di + 2] = 0
-                    dst[di + 3] = 0
-                }
+                let lum = (Int(src[si]) + Int(src[si + 1]) + Int(src[si + 2])) / 3
+                let alpha = smooth ? lum : (lum > 170 ? 255 : 0)
+                dst[di] = 255
+                dst[di + 1] = 255
+                dst[di + 2] = 255
+                dst[di + 3] = UInt8(alpha)
             }
         }
         return out
