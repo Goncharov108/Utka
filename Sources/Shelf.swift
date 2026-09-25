@@ -148,7 +148,7 @@ final class ShelfModel {
         }
     }
 
-    /// Снимки пишутся сразу в папку утки, без плашки в углу экрана.
+    /// Снимки пишутся в папку утки, без плашки в углу экрана.
     private func retargetScreenshotCapture(to dir: URL) {
         var domain = UserDefaults.standard.persistentDomain(forName: "com.apple.screencapture") ?? [:]
         let already = (domain["location"] as? String) == dir.path && (domain["show-thumbnail"] as? Bool) == false

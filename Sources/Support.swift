@@ -156,8 +156,10 @@ final class FileCardView: NSView, NSDraggingSource {
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         onDrag?(false)
         didDrag = false
-        if consumeOnDrop && !operation.isEmpty {
-            onRemove?()
+        guard consumeOnDrop, !operation.isEmpty else { return }
+        let remove = onRemove
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            remove?()
         }
     }
 
