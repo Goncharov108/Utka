@@ -159,8 +159,12 @@ final class PresetsView: NSView {
         emptyFiles.alignment = .center
         styleField(titleField, placeholder: "Название")
         styleField(bodyField, placeholder: "Фраза, адрес или ссылка")
-        addButton.title = "Добавить"
-        addButton.bezelStyle = .rounded
+        addButton.title = ""
+        addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Добавить")?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
+        addButton.imagePosition = .imageOnly
+        addButton.bezelStyle = .circular
+        addButton.contentTintColor = .white
         addButton.target = self
         addButton.action = #selector(addText)
         addSubview(fileScroll)
@@ -183,16 +187,19 @@ final class PresetsView: NSView {
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
         super.resizeSubviews(withOldSize: oldSize)
-        let fileH: CGFloat = 118
+        let fileH: CGFloat = 96
         fileScroll.frame = NSRect(x: 0, y: bounds.height - fileH, width: bounds.width, height: fileH)
         emptyFiles.frame = fileScroll.frame
-        let formY: CGFloat = 0
-        let formH: CGFloat = 28
-        titleField.frame = NSRect(x: 0, y: formY, width: 120, height: formH)
-        bodyField.frame = NSRect(x: 128, y: formY, width: max(80, bounds.width - 230), height: formH)
-        addButton.frame = NSRect(x: bounds.width - 96, y: formY - 2, width: 96, height: formH)
-        errorLabel.frame = NSRect(x: 0, y: formH + 4, width: bounds.width, height: 16)
-        textScroll.frame = NSRect(x: 0, y: formH + 22, width: bounds.width, height: max(40, bounds.height - fileH - formH - 28))
+        let formY: CGFloat = 4
+        let formH: CGFloat = 26
+        let plus: CGFloat = 26
+        let titleW = min(140, max(72, (bounds.width - plus - 16) * 0.34))
+        titleField.frame = NSRect(x: 0, y: formY, width: titleW, height: formH)
+        bodyField.frame = NSRect(x: titleW + 8, y: formY, width: max(40, bounds.width - titleW - plus - 16), height: formH)
+        addButton.frame = NSRect(x: bounds.width - plus, y: formY, width: plus, height: formH)
+        errorLabel.frame = NSRect(x: 0, y: formY + formH + 2, width: bounds.width - plus - 8, height: 14)
+        let textY = formY + formH + 18
+        textScroll.frame = NSRect(x: 0, y: textY, width: bounds.width, height: max(24, bounds.height - fileH - textY - 6))
         layoutContent()
     }
 
@@ -227,10 +234,10 @@ final class PresetsView: NSView {
     private func layoutContent() {
         var x: CGFloat = 0
         for card in cards {
-            card.frame = NSRect(x: x, y: 4, width: 112, height: 104)
+            card.frame = NSRect(x: x, y: 2, width: 100, height: 90)
             x += 120
         }
-        fileDocument.frame = NSRect(x: 0, y: 0, width: max(x, 1), height: 112)
+        fileDocument.frame = NSRect(x: 0, y: 0, width: max(x, 1), height: 96)
         let width = max(textScroll.contentView.bounds.width, textScroll.bounds.width)
         var y: CGFloat = 0
         for row in rows {

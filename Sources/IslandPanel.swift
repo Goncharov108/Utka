@@ -201,7 +201,14 @@ final class IslandPanel {
                 y -= 42
             }
             self.titleLabel.frame = NSRect(x: 96, y: root.bounds.height - 36, width: root.bounds.width - 112, height: 22)
-            self.body.frame = NSRect(x: 96, y: 12, width: root.bounds.width - 108, height: root.bounds.height - 52)
+            let bottom: CGFloat = 14
+            let right: CGFloat = 48
+            self.body.frame = NSRect(
+                x: 96,
+                y: bottom,
+                width: max(120, root.bounds.width - 96 - right),
+                height: max(80, root.bounds.height - bottom - 48)
+            )
             if let visible = self.body.subviews.first {
                 visible.frame = self.body.bounds
                 visible.resizeSubviews(withOldSize: visible.bounds.size)
