@@ -127,7 +127,9 @@ final class IslandRoot: NSView {
 /// Цель кнопки снимка: сама панель не наследник NSObject.
 private final class ShotButtonTarget: NSObject {
     var fire: () -> Void = {}
-    @objc func take() { fire() }
+    @objc func take() {
+        fire()
+    }
 }
 
 /// Островок у верхнего края выбранного экрана.
@@ -198,12 +200,13 @@ final class IslandPanel {
 
         shotButton.isBordered = false
         shotButton.imagePosition = .imageOnly
-        shotButton.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Снимок области")?
-            .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
-        shotButton.contentTintColor = .white
-        shotButton.wantsLayer = true
-        shotButton.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        shotButton.layer?.cornerRadius = 14
+        shotButton.imageScaling = .scaleProportionallyDown
+        if let url = Bundle.main.url(forResource: "shot-mark", withExtension: "png") {
+            let image = NSImage(contentsOf: url)
+            image?.isTemplate = false
+            shotButton.image = image
+        }
+        shotButton.contentTintColor = nil
         shotButton.toolTip = "Снимок области"
         shotTarget.fire = { [weak self] in self?.onCapture?() }
         shotButton.target = shotTarget
@@ -227,7 +230,7 @@ final class IslandPanel {
             let right: CGFloat = 48
             let barH: CGFloat = 32
             self.topBar.frame = NSRect(x: 96, y: root.bounds.height - 12 - barH, width: max(120, root.bounds.width - 96 - right), height: barH)
-            self.shotButton.frame = NSRect(x: self.topBar.bounds.width - 32, y: 2, width: 28, height: 28)
+            self.shotButton.frame = NSRect(x: self.topBar.bounds.width - 28, y: 4, width: 24, height: 24)
             let bodyTop = root.bounds.height - 12 - barH - 8
             self.body.frame = NSRect(
                 x: 96,
@@ -268,6 +271,13 @@ final class IslandPanel {
         let top = (window.screen ?? NSScreen.main)?.frame.maxY ?? frame.maxY
         let tucked = CGRect(x: frame.minX, y: top, width: frame.width, height: frame.height)
         slide(from: frame, to: tucked, orderOut: true)
+    }
+
+    /// Сразу убрать окно, без выезда. Иначе жест снимка попадает в островок.
+    func dismiss() {
+        slideTimer?.invalidate()
+        slideTimer = nil
+        window.orderOut(nil)
     }
 
     /// Выезд из-за кромки. Аниматор окна у неактивного агента не тикает, поэтому кадры сами.

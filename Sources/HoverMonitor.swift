@@ -52,6 +52,10 @@ final class HoverMonitor {
             }
             return
         }
+        if suspended {
+            insideSince = nil
+            return
+        }
         if let screen = screen(at: point) {
             outsideSince = nil
             if open {

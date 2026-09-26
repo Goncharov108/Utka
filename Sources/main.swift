@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 
 /// Сборка агента: жест, островок, четыре раздела, иконка в строке меню.
 final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -10,7 +11,8 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var presetsView: PresetsView!
     private var statusItem: NSStatusItem!
     private var toggleItem: NSMenuItem!
-    private let shotPicker = ShotPicker()
+    private var capturing = false
+    private var askingCapture = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let support = UtkaPaths.support
@@ -31,7 +33,6 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.onSection = { [weak self] section in
             if section == .presets { self?.presetsView.refresh() }
         }
-        shotPicker.onDone = { [weak self] in self?.hover.suspended = false }
         panel.onCapture = { [weak self] in self?.captureRegion() }
         shelfView.onDrag = { [weak self] active in self?.hover.suspended = active }
         presetsView.onDrag = { [weak self] active in self?.hover.suspended = active }
@@ -50,6 +51,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         history.startPolling()
         shelf.startScreenshotWatch()
         hover.start()
+        resumeCaptureIfGranted()
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard event.keyCode == 53, self?.panel.window.isKeyWindow == true else { return event }
             self?.panel.hide()
@@ -99,13 +101,59 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !hover.enabled { panel.hide() }
     }
 
-    /// Своя рамка на всех экранах. Системный жест из утки не доходит до macOS.
+    /// Если доступ уже выдали живому процессу — сразу открыть крестик.
+    private func resumeCaptureIfGranted() {
+        guard UserDefaults.standard.bool(forKey: AreaShot.pendingKey) else { return }
+        UserDefaults.standard.set(false, forKey: AreaShot.pendingKey)
+        guard CGPreflightScreenCaptureAccess() else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            self?.captureRegion()
+        }
+    }
+
+    /// Прячет островок и открывает системный выбор области. Без доступа окна на снимке пустые, поэтому снимок не запускается.
     private func captureRegion() {
+        guard !capturing, !askingCapture else { return }
+        if !CGPreflightScreenCaptureAccess() {
+            requestCaptureAccess()
+            return
+        }
+        capturing = true
         hover.suspended = true
         hover.markClosed()
-        panel.hide()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-            self?.shotPicker.begin()
+        panel.dismiss()
+        let file = AreaShot.destination()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            defer {
+                DispatchQueue.main.async {
+                    self?.capturing = false
+                    self?.hover.suspended = false
+                }
+            }
+            AreaShot.runInteractive(to: file)
+        }
+    }
+
+    /// Просит доступ и перезапускает утку, когда его дали. Старый процесс разрешение не подхватывает.
+    private func requestCaptureAccess() {
+        askingCapture = true
+        CGRequestScreenCaptureAccess()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var granted = false
+            for _ in 0..<45 {
+                if AreaShot.freshProcessHasAccess() {
+                    granted = true
+                    break
+                }
+                Thread.sleep(forTimeInterval: 1)
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.askingCapture = false
+                guard granted else { return }
+                UserDefaults.standard.set(true, forKey: AreaShot.pendingKey)
+                AreaShot.relaunch()
+            }
         }
     }
 
@@ -205,6 +253,84 @@ enum SelfCheck {
         failed = true
         fputs("FAIL \(message)\n", stderr)
     }
+}
+
+@_silgen_name("responsibility_spawnattrs_setdisclaim")
+private func responsibility_spawnattrs_setdisclaim(_ attr: UnsafeMutablePointer<posix_spawnattr_t?>, _ disclaim: UInt32) -> Int32
+
+/// Системный выбор области. Снимок без доступа к записи экрана оставляет только обои.
+enum AreaShot {
+    static let pendingKey = "captureAfterGrant"
+
+    /// Путь в папке утки, не на рабочем столе.
+    static func destination() -> URL {
+        let dir = UtkaPaths.support.appendingPathComponent("Shots", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let stamp = DateFormatter()
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        stamp.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        return dir.appendingPathComponent("Снимок экрана \(stamp.string(from: Date())).png")
+    }
+
+    /// Крестик выбора. Процесс живёт, пока область не выбрана или не отменена.
+    static func runInteractive(to file: URL) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        task.arguments = ["-i", file.path]
+        guard (try? task.run()) != nil else { return }
+        task.waitUntilExit()
+    }
+
+    /// Новый процесс сам отвечает за разрешение. Ребёнок утки унаследовал бы отказ родителя.
+    static func freshProcessHasAccess() -> Bool {
+        guard let exe = Bundle.main.executablePath else { return false }
+        var attr: posix_spawnattr_t?
+        guard posix_spawnattr_init(&attr) == 0 else { return false }
+        defer { posix_spawnattr_destroy(&attr) }
+        guard responsibility_spawnattrs_setdisclaim(&attr, 1) == 0 else { return false }
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        var fds: [Int32] = [0, 0]
+        guard pipe(&fds) == 0 else { return false }
+        posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO)
+        posix_spawn_file_actions_addclose(&actions, fds[0])
+        let arg0 = strdup(exe)
+        let arg1 = strdup("--capture-access")
+        defer {
+            free(arg0)
+            free(arg1)
+        }
+        var argv: [UnsafeMutablePointer<CChar>?] = [arg0, arg1, nil]
+        var pid: pid_t = 0
+        let rc: Int32 = argv.withUnsafeMutableBufferPointer { buf in
+            posix_spawn(&pid, exe, &actions, &attr, buf.baseAddress, environ)
+        }
+        close(fds[1])
+        guard rc == 0 else {
+            close(fds[0])
+            return false
+        }
+        let data = FileHandle(fileDescriptor: fds[0], closeOnDealloc: true).readDataToEndOfFile()
+        var status: Int32 = 0
+        waitpid(pid, &status, 0)
+        return String(data: data, encoding: .utf8)?.contains("yes") == true
+    }
+
+    /// Вторая копия с новым разрешением, затем эта закрывается.
+    static func relaunch() {
+        let config = NSWorkspace.OpenConfiguration()
+        config.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config) { _, error in
+            guard error == nil else { return }
+            NSApp.terminate(nil)
+        }
+    }
+}
+
+if CommandLine.arguments.contains("--capture-access") {
+    print(CGPreflightScreenCaptureAccess() ? "yes" : "no")
+    exit(0)
 }
 
 let app = NSApplication.shared

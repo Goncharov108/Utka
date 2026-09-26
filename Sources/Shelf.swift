@@ -164,9 +164,23 @@ final class ShelfModel {
         try? task.run()
     }
 
+    /// Каталог открывается не на главном потоке: диалог доступа к столу иначе вешает запуск.
     private func watch(_ dir: URL) {
-        let fd = Darwin.open(dir.path, O_EVTONLY)
-        guard fd >= 0 else { return }
+        let path = dir.path
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let fd = Darwin.open(path, O_EVTONLY)
+            guard fd >= 0 else { return }
+            DispatchQueue.main.async {
+                guard let self else {
+                    Darwin.close(fd)
+                    return
+                }
+                self.installWatch(fd: fd)
+            }
+        }
+    }
+
+    private func installWatch(fd: Int32) {
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
             eventMask: [.write, .rename, .link],
