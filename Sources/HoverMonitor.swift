@@ -79,10 +79,6 @@ final class HoverMonitor {
             outsideSince = nil
             return
         }
-        if suspended && open {
-            outsideSince = nil
-            return
-        }
         guard open else {
             outsideSince = nil
             return

@@ -279,6 +279,14 @@ enum AreaShot {
         task.arguments = ["-i", file.path]
         guard (try? task.run()) != nil else { return }
         task.waitUntilExit()
+        discardCancelledShot(file, status: task.terminationStatus)
+    }
+
+    /// Отмена крестика не должна оставлять пустой файл на полке.
+    private static func discardCancelledShot(_ file: URL, status: Int32) {
+        let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.intValue ?? 0
+        guard status != 0 || size == 0 else { return }
+        try? FileManager.default.removeItem(at: file)
     }
 
     /// Новый процесс сам отвечает за разрешение. Ребёнок утки унаследовал бы отказ родителя.
@@ -317,14 +325,37 @@ enum AreaShot {
         return String(data: data, encoding: .utf8)?.contains("yes") == true
     }
 
-    /// Вторая копия с новым разрешением, затем эта закрывается.
+    /// Новая копия стартует после выхода этой, уже с записанным флагом снимка.
     static func relaunch() {
-        let config = NSWorkspace.OpenConfiguration()
-        config.createsNewApplicationInstance = true
-        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config) { _, error in
-            guard error == nil else { return }
-            NSApp.terminate(nil)
+        UserDefaults.standard.synchronize()
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let app = Bundle.main.bundlePath
+        let script = "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; open \"\(app)\""
+        guard spawnNewSession(script) else { return }
+        NSApp.terminate(nil)
+    }
+
+    /// Оболочка в своей сессии, иначе выход утки оборвёт перезапуск.
+    private static func spawnNewSession(_ script: String) -> Bool {
+        var attr: posix_spawnattr_t?
+        guard posix_spawnattr_init(&attr) == 0 else { return false }
+        defer { posix_spawnattr_destroy(&attr) }
+        guard posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID)) == 0 else { return false }
+        let sh = strdup("/bin/sh")
+        let flag = strdup("-c")
+        let cmd = strdup(script)
+        defer {
+            free(sh)
+            free(flag)
+            free(cmd)
         }
+        guard sh != nil, flag != nil, cmd != nil else { return false }
+        var argv: [UnsafeMutablePointer<CChar>?] = [sh, flag, cmd, nil]
+        var pid: pid_t = 0
+        let rc: Int32 = argv.withUnsafeMutableBufferPointer { buf in
+            posix_spawn(&pid, "/bin/sh", nil, &attr, buf.baseAddress, environ)
+        }
+        return rc == 0
     }
 }
 
