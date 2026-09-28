@@ -124,6 +124,38 @@ final class IslandRoot: NSView {
     }
 }
 
+/// Знак снимка сразу в размер кнопки. Иначе система сжимает файл в 24 пикселя и растягивает их на сетчатке.
+private func shotMark(url: URL) -> NSImage? {
+    guard let source = NSImage(contentsOf: url) else { return nil }
+    let side: CGFloat = 24
+    let image = NSImage(size: NSSize(width: side, height: side))
+    let full = NSRect(origin: .zero, size: source.size)
+    for scale in [2, 3] {
+        let pixels = Int((side * CGFloat(scale)).rounded())
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixels,
+            pixelsHigh: pixels,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { continue }
+        rep.size = NSSize(width: side, height: side)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSGraphicsContext.current?.imageInterpolation = .high
+        source.draw(in: NSRect(x: 0, y: 0, width: side, height: side), from: full, operation: .sourceOver, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+        image.addRepresentation(rep)
+    }
+    image.isTemplate = false
+    return image.representations.isEmpty ? nil : image
+}
+
 /// Цель кнопки снимка: сама панель не наследник NSObject.
 private final class ShotButtonTarget: NSObject {
     var fire: () -> Void = {}
@@ -367,9 +399,7 @@ final class IslandPanel {
         shotButton.imagePosition = .imageOnly
         shotButton.imageScaling = .scaleProportionallyDown
         if let url = Bundle.main.url(forResource: "shot-mark", withExtension: "png") {
-            let image = NSImage(contentsOf: url)
-            image?.isTemplate = false
-            shotButton.image = image
+            shotButton.image = shotMark(url: url)
         }
         shotButton.contentTintColor = nil
         shotButton.toolTip = "Снимок области"
