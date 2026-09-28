@@ -26,15 +26,14 @@ static UtkaRing *gRing = NULL;
 static _Atomic uint32_t gVolumeBits = 0;
 static _Atomic uint32_t gMuted = 0;
 static _Atomic int32_t gIOCount = 0;
-static Float64 gTicksPerFrame = 0;
+static uint64_t gTickNumer = 0;
+static uint64_t gTickDenom = 1;
 static UInt64 gAnchorHost = 0;
 static UInt64 gClockSeed = 1;
 
-/// Сумма всех клиентов одного такта. Следующий такт публикует её, и каждый слушатель получает одно и то же.
+/// Сумма всех клиентов одного такта. Следующий такт записывает её в кольцо по номеру сэмпла.
 static float gBuild[UTKA_RING_FRAMES * 2];
-static float gLive[UTKA_RING_FRAMES * 2];
 static UInt32 gBuildFrames = 0;
-static UInt32 gLiveFrames = 0;
 static Float64 gBuildTime = 0;
 static UInt64 gBuildCycle = 0;
 static int gBuildOpen = 0;
@@ -71,28 +70,48 @@ static void storeVolume(Float32 value) {
     if (gRing) atomic_store_explicit(&gRing->volumeBits, bits, memory_order_relaxed);
 }
 
-/// Кольцо внутри плагина. Наружу звук отдаёт вход того же устройства, не общая память.
+/// Общая память кольца. При первом создании громкость — четверть, чтобы не открыться немым.
 static void createRing(void) {
     if (gRing) return;
-    gRing = calloc(1, sizeof(UtkaRing));
+    int created = 0;
+    gRing = utkaRingMap(&created);
     if (gRing == NULL) {
-        os_log_error(OS_LOG_DEFAULT, "utka ring alloc failed");
+        os_log_error(OS_LOG_DEFAULT, "utka ring map failed");
         return;
     }
-    gRing->magic = UTKA_RING_MAGIC;
-    gRing->version = UTKA_RING_VERSION;
-    gRing->sampleRate = UTKA_RING_RATE;
-    gRing->channels = UTKA_RING_CHANNELS;
-    gRing->frameCapacity = UTKA_RING_FRAMES;
-    storeVolume(0.25f);
+    if (created) {
+        storeVolume(0.25f);
+        return;
+    }
+    atomic_store_explicit(&gVolumeBits, atomic_load_explicit(&gRing->volumeBits, memory_order_relaxed), memory_order_relaxed);
+    atomic_store_explicit(&gMuted, atomic_load_explicit(&gRing->muted, memory_order_relaxed), memory_order_relaxed);
 }
 
+static uint64_t gcd64(uint64_t a, uint64_t b) {
+    while (b != 0) {
+        uint64_t rest = a % b;
+        a = b;
+        b = rest;
+    }
+    return a == 0 ? 1 : a;
+}
+
+/// Целые тики часов на кадр, чтобы метка времени не дрожала из-за округления.
 static void prepareClock(void) {
-    if (gTicksPerFrame != 0) return;
+    if (gTickNumer != 0) return;
     struct mach_timebase_info info;
     mach_timebase_info(&info);
-    double ticksPerSecond = 1e9 * (double)info.denom / (double)info.numer;
-    gTicksPerFrame = ticksPerSecond / (double)UTKA_RING_RATE;
+    if (info.numer == 0) return;
+    uint64_t numer = 1000000000ull * (uint64_t)info.denom;
+    uint64_t denom = (uint64_t)info.numer * (uint64_t)UTKA_RING_RATE;
+    uint64_t divisor = gcd64(numer, denom);
+    gTickNumer = numer / divisor;
+    gTickDenom = denom / divisor;
+}
+
+static uint64_t hostTicksForFrames(uint64_t frames) {
+    if (gTickDenom == 0) return 0;
+    return (uint64_t)(((__uint128_t)frames * gTickNumer) / gTickDenom);
 }
 
 static AudioStreamBasicDescription streamFormat(void) {
@@ -224,17 +243,35 @@ static void notifyDevice(AudioObjectPropertySelector selector, AudioObjectProper
     gHost->PropertiesChanged(gHost, kDeviceID, 1, &address);
 }
 
-/// Публикует сумму такта. Громкость уже учтена, здесь только ограничение, чтобы сумма клиентов не клипповала в бесконечность.
-static void publishBuild(void) {
-    UInt32 frames = gBuildFrames;
+/// Ограничивает отсчёт диапазоном −1…1.
+static float clipSample(float sample) {
+    if (sample > 1) return 1;
+    if (sample < -1) return -1;
+    return sample;
+}
+
+/// Записывает готовый такт в кольцо по номеру сэмпла. Дырку между тактами заполняет тишиной.
+static void commitBuild(void) {
+    if (!gBuildOpen || gRing == NULL || gBuildFrames == 0 || gBuildTime < 0) return;
+    uint32_t frames = gBuildFrames;
     if (frames > UTKA_RING_FRAMES) frames = UTKA_RING_FRAMES;
-    for (UInt32 i = 0; i < frames * 2; i++) {
-        float sample = gBuild[i];
-        if (sample > 1) sample = 1;
-        if (sample < -1) sample = -1;
-        gLive[i] = sample;
+    uint64_t start = (uint64_t)(gBuildTime + 0.5);
+    uint64_t prev = atomic_load_explicit(&gRing->writeFrame, memory_order_relaxed);
+    uint32_t mask = UTKA_RING_FRAMES - 1u;
+    if (start > prev && start - prev < UTKA_RING_FRAMES) {
+        for (uint64_t frame = prev; frame < start; frame++) {
+            uint32_t index = (uint32_t)frame & mask;
+            gRing->samples[index * 2u] = 0;
+            gRing->samples[index * 2u + 1u] = 0;
+        }
     }
-    gLiveFrames = frames;
+    for (uint32_t i = 0; i < frames; i++) {
+        uint32_t index = (uint32_t)(start + i) & mask;
+        gRing->samples[index * 2u] = clipSample(gBuild[i * 2u]);
+        gRing->samples[index * 2u + 1u] = clipSample(gBuild[i * 2u + 1u]);
+    }
+    uint64_t end = start + frames;
+    if (end >= prev) atomic_store_explicit(&gRing->writeFrame, end, memory_order_release);
 }
 
 /// Складывает вклад клиента в текущий такт. Новый момент времени публикует предыдущую сумму.
@@ -252,7 +289,7 @@ static void writeMix(float *samples, UInt32 frames, const AudioServerPlugInIOCyc
         else newPeriod = cycle != gBuildCycle;
     }
     if (newPeriod) {
-        if (gBuildOpen) publishBuild();
+        if (gBuildOpen) commitBuild();
         memset(gBuild, 0, (size_t)frames * 2 * sizeof(float));
         gBuildFrames = frames;
         gBuildTime = time;
@@ -269,15 +306,29 @@ static void writeMix(float *samples, UInt32 frames, const AudioServerPlugInIOCyc
     os_unfair_lock_unlock(&gMixLock);
 }
 
-/// Отдаёт уже собранный такт. Все слушатели читают одну сумму, а не последнего, кто успел записать.
-static void readInput(float *samples, UInt32 frames) {
+/// Петля читает ту же ленту по номеру сэмпла. Если этот номер ещё не записан, берёт последний готовый кусок.
+static void readInput(float *samples, UInt32 frames, const AudioServerPlugInIOCycleInfo *info) {
     if (samples == NULL || frames == 0) return;
     memset(samples, 0, (size_t)frames * 2 * sizeof(float));
+    if (gRing == NULL) return;
     if (frames > UTKA_RING_FRAMES) frames = UTKA_RING_FRAMES;
-    os_unfair_lock_lock(&gMixLock);
-    UInt32 count = frames < gLiveFrames ? frames : gLiveFrames;
-    if (count > 0) memcpy(samples, gLive, (size_t)count * 2 * sizeof(float));
-    os_unfair_lock_unlock(&gMixLock);
+    uint64_t write = atomic_load_explicit(&gRing->writeFrame, memory_order_acquire);
+    if (write == 0) return;
+    uint64_t start = write > frames ? write - frames : 0;
+    int timeValid = info != NULL && (info->mInputTime.mFlags & kAudioTimeStampSampleTimeValid) != 0 && info->mInputTime.mSampleTime >= 0;
+    if (timeValid) {
+        uint64_t asked = (uint64_t)(info->mInputTime.mSampleTime + 0.5);
+        if (asked < write && write - asked <= UTKA_RING_FRAMES) {
+            start = asked;
+            if (start + frames > write) frames = (UInt32)(write - start);
+        }
+    }
+    uint32_t mask = UTKA_RING_FRAMES - 1u;
+    for (UInt32 i = 0; i < frames; i++) {
+        uint32_t index = (uint32_t)(start + i) & mask;
+        samples[i * 2u] = gRing->samples[index * 2u];
+        samples[i * 2u + 1u] = gRing->samples[index * 2u + 1u];
+    }
 }
 
 static Boolean sameUUID(CFUUIDBytes iid, CFUUIDRef uuid) {
@@ -741,7 +792,15 @@ static OSStatus Utka_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID 
         prepareClock();
         gAnchorHost = mach_absolute_time();
         gClockSeed += 1;
-        if (gRing) gRing->active = 1;
+        os_unfair_lock_lock(&gMixLock);
+        gBuildOpen = 0;
+        gBuildFrames = 0;
+        if (gRing) {
+            atomic_store_explicit(&gRing->writeFrame, 0, memory_order_release);
+            atomic_fetch_add_explicit(&gRing->epoch, 1, memory_order_release);
+            gRing->active = 1;
+        }
+        os_unfair_lock_unlock(&gMixLock);
     }
     return noErr;
 }
@@ -757,13 +816,14 @@ static OSStatus Utka_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID i
 static OSStatus Utka_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, Float64 *outSampleTime, UInt64 *outHostTime, UInt64 *outSeed) {
     (void)inDriver; (void)inDeviceObjectID; (void)inClientID;
     if (outSampleTime == NULL || outHostTime == NULL || outSeed == NULL) return kAudioHardwareIllegalOperationError;
-    if (atomic_load_explicit(&gIOCount, memory_order_relaxed) <= 0 || gTicksPerFrame == 0) return kAudioHardwareNotRunningError;
+    if (atomic_load_explicit(&gIOCount, memory_order_relaxed) <= 0 || gTickNumer == 0 || gTickDenom == 0) return kAudioHardwareNotRunningError;
     UInt64 now = mach_absolute_time();
     if (now < gAnchorHost) now = gAnchorHost;
-    double frames = (double)(now - gAnchorHost) / gTicksPerFrame;
-    UInt64 periods = (UInt64)(frames / (double)kClockPeriod);
-    *outSampleTime = (Float64)(periods * kClockPeriod);
-    *outHostTime = gAnchorHost + (UInt64)((double)(periods * kClockPeriod) * gTicksPerFrame);
+    uint64_t frames = (uint64_t)(((__uint128_t)(now - gAnchorHost) * gTickDenom) / gTickNumer);
+    uint64_t periods = frames / (uint64_t)kClockPeriod;
+    uint64_t periodFrames = periods * (uint64_t)kClockPeriod;
+    *outSampleTime = (Float64)periodFrames;
+    *outHostTime = gAnchorHost + hostTicksForFrames(periodFrames);
     *outSeed = gClockSeed;
     return noErr;
 }
@@ -784,7 +844,7 @@ static OSStatus Utka_BeginIOOperation(AudioServerPlugInDriverRef inDriver, Audio
 static OSStatus Utka_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo, void *ioMainBuffer, void *ioSecondaryBuffer) {
     (void)inDriver; (void)inDeviceObjectID; (void)inStreamObjectID; (void)inClientID; (void)ioSecondaryBuffer;
     if (inOperationID == kAudioServerPlugInIOOperationWriteMix) writeMix(ioMainBuffer, inIOBufferFrameSize, inIOCycleInfo);
-    if (inOperationID == kAudioServerPlugInIOOperationReadInput) readInput(ioMainBuffer, inIOBufferFrameSize);
+    if (inOperationID == kAudioServerPlugInIOOperationReadInput) readInput(ioMainBuffer, inIOBufferFrameSize, inIOCycleInfo);
     return noErr;
 }
 
