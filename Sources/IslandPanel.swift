@@ -132,11 +132,176 @@ private final class ShotButtonTarget: NSObject {
     }
 }
 
+/// Ползунок, который сообщает, когда его тянут, чтобы не перетирать позицию из CoreAudio.
+private final class VolumeSlider: NSSlider {
+    var onTracking: ((Bool) -> Void)?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        onTracking?(true)
+        super.mouseDown(with: event)
+        onTracking?(false)
+    }
+}
+
+/// Громкость и кнопки выходов на верхней полосе, слева от снимка.
+final class SoundStrip: NSView {
+    private let muteButton = NSButton()
+    private let slider = VolumeSlider()
+    private var deviceButtons: [NSButton] = []
+    private var shown: [AudioOutput.Sink] = []
+    private var trackingVolume = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        muteButton.isBordered = false
+        muteButton.imagePosition = .imageOnly
+        muteButton.imageScaling = .scaleProportionallyDown
+        muteButton.toolTip = "Беззвучие"
+        muteButton.target = self
+        muteButton.action = #selector(muteClicked)
+        muteButton.focusRingType = .none
+        addSubview(muteButton)
+
+        slider.minValue = 0
+        slider.maxValue = 1
+        slider.isContinuous = true
+        slider.controlSize = .small
+        slider.focusRingType = .none
+        slider.target = self
+        slider.action = #selector(volumeMoved(_:))
+        slider.toolTip = "Громкость"
+        slider.onTracking = { [weak self] tracking in
+            self?.trackingVolume = tracking
+            if !tracking { self?.apply() }
+        }
+        addSubview(slider)
+
+        AudioOutput.shared.onChange = { [weak self] in self?.apply() }
+        AudioOutput.shared.start()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var frame: NSRect {
+        didSet {
+            if frame.size != oldValue.size { place() }
+        }
+    }
+
+    /// Раскладывает значок, ползунок и кнопки выходов по ширине полосы.
+    private func place() {
+        let bar = bounds.height
+        muteButton.frame = NSRect(x: 0, y: (bar - 24) / 2, width: 24, height: 24)
+        let sliderWidth = min(120, max(72, bounds.width * 0.22))
+        slider.frame = NSRect(x: 28, y: (bar - 18) / 2, width: sliderWidth, height: 18)
+        let count = deviceButtons.count
+        guard count > 0 else { return }
+        let gap: CGFloat = 4
+        let origin = slider.frame.maxX + 8
+        let slots = CGFloat(count)
+        let available = bounds.width - origin
+        let width = max(0, (available - gap * (slots - 1)) / slots)
+        var x = origin
+        for button in deviceButtons {
+            button.frame = NSRect(x: x, y: (bar - 24) / 2, width: width, height: 24)
+            x += width + gap
+        }
+    }
+
+    /// Пересобирает кнопки, если список выходов изменился, и подсвечивает текущий.
+    private func apply() {
+        let audio = AudioOutput.shared
+        if audio.sinks != shown {
+            shown = audio.sinks
+            deviceButtons.forEach { $0.removeFromSuperview() }
+            deviceButtons = shown.map(makeSinkButton)
+            place()
+        }
+        for button in deviceButtons {
+            paint(button, on: button.tag == Int(audio.currentID))
+        }
+        slider.isEnabled = audio.canAdjustVolume
+        slider.alphaValue = audio.canAdjustVolume ? 1 : 0.35
+        slider.toolTip = audio.canAdjustVolume ? "Громкость" : "Нет регулировки"
+        if !trackingVolume, audio.canAdjustVolume, abs(slider.doubleValue - Double(audio.volume)) > 0.001 {
+            slider.doubleValue = Double(audio.volume)
+        }
+        muteButton.isEnabled = audio.canMute
+        let symbol = speakerSymbol(volume: audio.volume, muted: audio.muted, adjustable: audio.canAdjustVolume || audio.canMute)
+        muteButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Громкость")?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+        muteButton.contentTintColor = muteButton.isEnabled ? UtkaChrome.ink : NSColor.white.withAlphaComponent(0.35)
+    }
+
+    /// Кнопка одного выхода: символ транспорта и имя.
+    private func makeSinkButton(_ sink: AudioOutput.Sink) -> NSButton {
+        let button = NSButton()
+        button.isBordered = false
+        button.imagePosition = .imageLeading
+        button.imageScaling = .scaleProportionallyDown
+        button.imageHugsTitle = true
+        button.alignment = .center
+        button.lineBreakMode = .byTruncatingTail
+        button.font = UtkaChrome.font(11, weight: .medium)
+        button.title = sink.name
+        button.toolTip = sink.name
+        button.tag = Int(sink.id)
+        button.target = self
+        button.action = #selector(sinkClicked(_:))
+        button.focusRingType = .none
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 6
+        button.layer?.masksToBounds = true
+        button.image = NSImage(systemSymbolName: sink.symbol, accessibilityDescription: sink.name)?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        addSubview(button)
+        return button
+    }
+
+    /// Активный выход белый на карточке, остальные приглушены.
+    private func paint(_ button: NSButton, on: Bool) {
+        let color = on ? UtkaChrome.ink : NSColor.white.withAlphaComponent(0.4)
+        button.contentTintColor = color
+        button.attributedTitle = NSAttributedString(
+            string: button.toolTip ?? "",
+            attributes: [
+                .font: UtkaChrome.font(11, weight: .medium),
+                .foregroundColor: color
+            ]
+        )
+        button.layer?.backgroundColor = (on ? UtkaChrome.card : NSColor.clear).cgColor
+    }
+
+    /// Значок динамика по громкости и беззвучию.
+    private func speakerSymbol(volume: Float, muted: Bool, adjustable: Bool) -> String {
+        if !adjustable { return "speaker.wave.2" }
+        if muted || volume <= 0.001 { return "speaker.slash" }
+        if volume < 0.33 { return "speaker" }
+        if volume < 0.66 { return "speaker.wave.1" }
+        return "speaker.wave.2"
+    }
+
+    @objc private func sinkClicked(_ sender: NSButton) {
+        AudioOutput.shared.select(buttonTag: sender.tag)
+    }
+
+    @objc private func muteClicked() {
+        AudioOutput.shared.toggleMute()
+    }
+
+    @objc private func volumeMoved(_ sender: NSSlider) {
+        AudioOutput.shared.setVolume(Float(sender.doubleValue))
+    }
+}
+
 /// Островок у верхнего края выбранного экрана.
 final class IslandPanel {
     let window: KeyPanel
     /// Верхняя полоса на все разделы. Сюда сядут кнопки, подпись раздела не нужна.
     private let topBar = NSView()
+    private let soundStrip = SoundStrip()
     private let shotButton = NSButton()
     private let shotTarget = ShotButtonTarget()
     private let body = NSView()
@@ -211,6 +376,7 @@ final class IslandPanel {
         shotTarget.fire = { [weak self] in self?.onCapture?() }
         shotButton.target = shotTarget
         shotButton.action = #selector(ShotButtonTarget.take)
+        topBar.addSubview(soundStrip)
         topBar.addSubview(shotButton)
         root.addSubview(rail)
         root.addSubview(topBar)
@@ -231,6 +397,7 @@ final class IslandPanel {
             let barH: CGFloat = 32
             self.topBar.frame = NSRect(x: 96, y: root.bounds.height - 12 - barH, width: max(120, root.bounds.width - 96 - right), height: barH)
             self.shotButton.frame = NSRect(x: self.topBar.bounds.width - 28, y: 4, width: 24, height: 24)
+            self.soundStrip.frame = NSRect(x: 0, y: 0, width: max(0, self.shotButton.frame.minX - 8), height: barH)
             let bodyTop = root.bounds.height - 12 - barH - 8
             self.body.frame = NSRect(
                 x: 96,

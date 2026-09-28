@@ -59,6 +59,10 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        AudioOutput.shared.shutdown()
+    }
+
     private func installStatusItem(mark: NSImage?) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         let image = mark.map { MenuMark.template(from: $0) } ?? NSImage(systemSymbolName: "bird", accessibilityDescription: "Утка")
