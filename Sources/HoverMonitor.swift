@@ -14,13 +14,13 @@ final class HoverMonitor {
     private var open = false
     private var activeFrame: CGRect?
 
-    /// Полоса по центру верхнего края. Не захватывает меню Apple и часы.
+    /// Только верхняя кромка по центру. Тело островка сюда не входит: иначе утка выезжает, когда курсор просто проходит мимо.
     static func zone(for screen: NSScreen) -> CGRect {
         let frame = screen.frame
-        let height: CGFloat = 120
+        let lip: CGFloat = 8
         let width = min(max(screen.frame.width * 0.45, 480), 900)
         // contains() не включает верхнюю границу, поэтому самый край экрана в зону не попадал.
-        return CGRect(x: frame.midX - width / 2, y: frame.maxY - height, width: width, height: height + 4)
+        return CGRect(x: frame.midX - width / 2, y: frame.maxY - lip, width: width, height: lip + 4)
     }
 
     /// Окно уже убрано с экрана. Иначе курсор у верхнего края не откроет его снова.
