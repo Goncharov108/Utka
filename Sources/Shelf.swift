@@ -42,11 +42,17 @@ final class ShelfModel {
     }
 
     func remove(id: String) {
-        if let record = records.first(where: { $0.id == id }), isOwnedShot(record.path) {
+        if let record = records.first(where: { $0.id == id }), UtkaPaths.ownsShot(record.path) {
+            ShotStore.discard(beside: record.path)
             try? FileManager.default.removeItem(atPath: record.path)
         }
         records.removeAll { $0.id == id }
         save()
+        onChange?()
+    }
+
+    /// Карточка та же, файл на диске уже другой. Превью нужно перечитать.
+    func noteFileChanged() {
         onChange?()
     }
 
@@ -64,7 +70,7 @@ final class ShelfModel {
     /// Новые скриншоты пишутся в папку утки, а не на стол. Удаление карточки стирает файл.
     func startScreenshotWatch() {
         guard watchers.isEmpty else { return }
-        let shots = shotsDirectory()
+        let shots = UtkaPaths.shots
         try? FileManager.default.createDirectory(at: shots, withIntermediateDirectories: true)
         retargetScreenshotCapture(to: shots)
         relocateDesktopShots()
@@ -80,7 +86,7 @@ final class ShelfModel {
 
     private func scanShots() {
         var fresh: [URL] = []
-        for url in imageFiles(in: shotsDirectory()) where !knownShots.contains(url.path) {
+        for url in imageFiles(in: UtkaPaths.shots) where !knownShots.contains(url.path) {
             knownShots.insert(url.path)
             fresh.append(url)
         }
@@ -93,18 +99,8 @@ final class ShelfModel {
         add(urls: fresh)
     }
 
-    /// Куда macOS кладёт новые снимки экрана.
-    private func shotsDirectory() -> URL {
-        UtkaPaths.support.appendingPathComponent("Shots", isDirectory: true)
-    }
-
     private func desktopDirectory() -> URL {
         FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0]
-    }
-
-    private func isOwnedShot(_ path: String) -> Bool {
-        let root = shotsDirectory().path
-        return path == root || path.hasPrefix(root + "/")
     }
 
     private func isScreenshotName(_ name: String) -> Bool {
@@ -134,7 +130,7 @@ final class ShelfModel {
     }
 
     private func moveIntoShots(_ url: URL) -> URL? {
-        let dir = shotsDirectory()
+        let dir = UtkaPaths.shots
         if url.path.hasPrefix(dir.path + "/") { return url }
         var dest = dir.appendingPathComponent(url.lastPathComponent)
         if FileManager.default.fileExists(atPath: dest.path) {
@@ -193,12 +189,11 @@ final class ShelfModel {
     }
 
     private func imageFiles(in dir: URL) -> [URL] {
-        let exts: Set<String> = ["png", "jpg", "jpeg", "gif", "tif", "tiff", "heic", "webp"]
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
         return names.compactMap { name in
             guard !name.hasPrefix(".") else { return nil }
             let url = dir.appendingPathComponent(name)
-            guard exts.contains(url.pathExtension.lowercased()) else { return nil }
+            guard isImageFile(url: url) else { return nil }
             return url
         }
     }
@@ -258,6 +253,9 @@ final class ShelfView: NSView {
             card.consumeOnDrop = true
             card.onDrag = { [weak self] active in self?.onDrag?(active) }
             card.onRemove = { [weak self] in self?.model.remove(id: record.id) }
+            if let url = model.url(for: record) {
+                card.onEdit = { ShotEditor.open(url: url) }
+            }
             document.addSubview(card)
             return card
         }

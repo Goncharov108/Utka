@@ -18,6 +18,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let support = UtkaPaths.support
         history = ClipboardHistory(storeURL: support.appendingPathComponent("clipboard.json"))
         shelf = ShelfModel(storeURL: support.appendingPathComponent("shelf.json"))
+        ShotEditor.shelf = shelf
         presets = PresetsModel(storeURL: support.appendingPathComponent("presets.json"))
 
         let shelfView = ShelfView(model: shelf)

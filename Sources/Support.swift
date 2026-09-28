@@ -9,6 +9,25 @@ enum UtkaPaths {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
+
+    /// Папка снимков. Сюда же полка складывает системные кадры.
+    static var shots: URL {
+        let dir = support.appendingPathComponent("Shots", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Свой файл утки: удаление карточки имеет право стереть его.
+    static func ownsShot(_ path: String) -> Bool {
+        let root = shots.path
+        return path == root || path.hasPrefix(root + "/")
+    }
+}
+
+/// Картинка, а не документ. Карандаш на карточке только у таких файлов.
+func isImageFile(url: URL) -> Bool {
+    let images: Set<String> = ["png", "jpg", "jpeg", "gif", "tif", "tiff", "heic", "webp", "bmp"]
+    return images.contains(url.pathExtension.lowercased())
 }
 
 /// Закладка на файл, чтобы найти его после перезапуска.
@@ -55,9 +74,7 @@ final class FlippedClipView: NSClipView {
 
 /// Превью картинки или иконка файла.
 func filePreview(url: URL, maxPixel: CGFloat) -> NSImage {
-    let ext = url.pathExtension.lowercased()
-    let images: Set<String> = ["png", "jpg", "jpeg", "gif", "tif", "tiff", "heic", "webp", "bmp"]
-    if images.contains(ext), let thumb = thumbnail(url: url, maxPixel: maxPixel) {
+    if isImageFile(url: url), let thumb = thumbnail(url: url, maxPixel: maxPixel) {
         return thumb
     }
     return NSWorkspace.shared.icon(forFile: url.path)
@@ -88,11 +105,14 @@ final class FileCardView: NSView, NSDraggingSource {
     var consumeOnDrop = false
     var onRemove: (() -> Void)?
     var onDrag: ((Bool) -> Void)?
+    var onEdit: (() -> Void)? { didSet { updatePencil() } }
 
     private let iconView = NSImageView()
     private let nameLabel = UtkaChrome.label("", size: 11, color: UtkaChrome.dim)
     private let removeButton = NSButton()
+    private let editButton = NSButton()
     private var didDrag = false
+    private var showsPicture = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -109,9 +129,19 @@ final class FileCardView: NSView, NSDraggingSource {
         removeButton.contentTintColor = UtkaChrome.dim
         removeButton.target = self
         removeButton.action = #selector(removeTapped)
+        editButton.isBordered = false
+        editButton.imagePosition = .imageOnly
+        editButton.image = NSImage(systemSymbolName: "pencil", accessibilityDescription: "Пометить")?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        editButton.contentTintColor = UtkaChrome.ink
+        editButton.toolTip = "Пометить"
+        editButton.target = self
+        editButton.action = #selector(editTapped)
+        editButton.isHidden = true
         addSubview(iconView)
         addSubview(nameLabel)
         addSubview(removeButton)
+        addSubview(editButton)
     }
 
     required init?(coder: NSCoder) { nil }
@@ -120,12 +150,22 @@ final class FileCardView: NSView, NSDraggingSource {
     func show(url: URL?, title: String) {
         fileURL = url
         nameLabel.stringValue = title
-        if let url {
-            iconView.image = filePreview(url: url, maxPixel: 160)
+        showsPicture = false
+        if let url, isImageFile(url: url), let thumb = thumbnail(url: url, maxPixel: 160) {
+            iconView.image = thumb
+            showsPicture = true
+        } else if let url {
+            iconView.image = NSWorkspace.shared.icon(forFile: url.path)
         } else {
             iconView.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
         }
         toolTip = title
+        updatePencil()
+    }
+
+    /// Карандаш только на живой картинке, у которой есть куда открыть редактор.
+    private func updatePencil() {
+        editButton.isHidden = onEdit == nil || !showsPicture
     }
 
     override func layout() {
@@ -134,6 +174,7 @@ final class FileCardView: NSView, NSDraggingSource {
         nameLabel.frame = NSRect(x: 6, y: 6, width: bounds.width - 12, height: labelH)
         iconView.frame = NSRect(x: 18, y: labelH + 8, width: bounds.width - 36, height: bounds.height - labelH - 28)
         removeButton.frame = NSRect(x: bounds.width - 22, y: bounds.height - 20, width: 18, height: 18)
+        editButton.frame = NSRect(x: 4, y: bounds.height - 20, width: 18, height: 18)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -165,6 +206,10 @@ final class FileCardView: NSView, NSDraggingSource {
 
     @objc private func removeTapped() {
         onRemove?()
+    }
+
+    @objc private func editTapped() {
+        onEdit?()
     }
 }
 

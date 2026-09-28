@@ -212,6 +212,9 @@ final class PresetsView: NSView {
             card.consumeOnDrop = false
             card.onDrag = { [weak self] active in self?.onDrag?(active) }
             card.onRemove = { [weak self] in self?.model.remove(id: preset.id) }
+            if let url = model.url(for: preset) {
+                card.onEdit = { ShotEditor.open(url: url) }
+            }
             fileDocument.addSubview(card)
             return card
         }
