@@ -14,6 +14,38 @@ struct ShotPoint: Codable, Equatable {
     }
 }
 
+/// Цвет пометки. Старые файлы без цвета читаются как белые.
+struct ShotInk: Equatable {
+    var red: Double
+    var green: Double
+    var blue: Double
+
+    var color: NSColor { NSColor(srgbRed: red, green: green, blue: blue, alpha: 1) }
+
+    static let white = ShotInk(red: 1, green: 1, blue: 1)
+    static let palette: [ShotInk] = [
+        ShotInk(red: 1, green: 1, blue: 1),
+        ShotInk(red: 0.12, green: 0.12, blue: 0.12),
+        ShotInk(red: 0.93, green: 0.24, blue: 0.18),
+        ShotInk(red: 0.98, green: 0.76, blue: 0.14),
+        ShotInk(red: 0.24, green: 0.74, blue: 0.38),
+        ShotInk(red: 0.22, green: 0.48, blue: 0.95)
+    ]
+
+    static func nearest(_ ink: ShotInk) -> Int {
+        palette.enumerated().min { lhs, rhs in
+            distance(lhs.element, ink) < distance(rhs.element, ink)
+        }?.offset ?? 0
+    }
+
+    private static func distance(_ a: ShotInk, _ b: ShotInk) -> Double {
+        let dr = a.red - b.red
+        let dg = a.green - b.green
+        let db = a.blue - b.blue
+        return dr * dr + dg * dg + db * db
+    }
+}
+
 /// Одна пометка поверх снимка. В файл пикселей попадает только при сохранении.
 struct ShotMark: Codable, Equatable {
     var id: String
@@ -21,6 +53,41 @@ struct ShotMark: Codable, Equatable {
     var points: [ShotPoint]
     var text: String
     var textSize: Double
+    var red: Double
+    var green: Double
+    var blue: Double
+
+    var ink: ShotInk {
+        get { ShotInk(red: red, green: green, blue: blue) }
+        set {
+            red = newValue.red
+            green = newValue.green
+            blue = newValue.blue
+        }
+    }
+
+    init(id: String, kind: String, points: [ShotPoint], text: String, textSize: Double, ink: ShotInk) {
+        self.id = id
+        self.kind = kind
+        self.points = points
+        self.text = text
+        self.textSize = textSize
+        red = ink.red
+        green = ink.green
+        blue = ink.blue
+    }
+
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        id = try box.decode(String.self, forKey: .id)
+        kind = try box.decode(String.self, forKey: .kind)
+        points = try box.decode([ShotPoint].self, forKey: .points)
+        text = try box.decodeIfPresent(String.self, forKey: .text) ?? ""
+        textSize = try box.decodeIfPresent(Double.self, forKey: .textSize) ?? 18
+        red = try box.decodeIfPresent(Double.self, forKey: .red) ?? 1
+        green = try box.decodeIfPresent(Double.self, forKey: .green) ?? 1
+        blue = try box.decodeIfPresent(Double.self, forKey: .blue) ?? 1
+    }
 }
 
 enum ShotTool: Int {
@@ -113,18 +180,19 @@ func drawMarks(_ marks: [ShotMark], imageSize: CGSize, in rect: CGRect, selected
     let width = max(1.25, imageSize.width * 0.003) * scale
     for mark in marks {
         let strong = mark.id == selected
-        strokeMark(path(for: mark, in: rect, imageSize: imageSize), width: strong ? width * 1.45 : width)
+        let ink = mark.ink.color
+        strokeMark(path(for: mark, in: rect, imageSize: imageSize), width: strong ? width * 1.45 : width, color: ink)
         if mark.kind == "text", let origin = mark.points.first {
             let font = UtkaChrome.font(max(11, CGFloat(mark.textSize) * scale))
             let shadow = NSShadow()
-            shadow.shadowColor = NSColor.black
+            shadow.shadowColor = markHalo(ink)
             shadow.shadowBlurRadius = 2
             shadow.shadowOffset = .zero
             let placed = place(origin, in: rect, imageSize: imageSize)
             let box = NSRect(x: placed.x, y: placed.y, width: max(rect.width, 40), height: font.pointSize * 1.4)
             (mark.text as NSString).draw(in: box, withAttributes: [
                 .font: font,
-                .foregroundColor: NSColor.white,
+                .foregroundColor: ink,
                 .shadow: shadow
             ])
         }
@@ -207,16 +275,24 @@ private func path(for mark: ShotMark, in rect: CGRect, imageSize: CGSize) -> NSB
     return path
 }
 
-private func strokeMark(_ path: NSBezierPath, width: CGFloat) {
+private func strokeMark(_ path: NSBezierPath, width: CGFloat, color: NSColor) {
     guard !path.isEmpty else { return }
     path.lineCapStyle = .round
     path.lineJoinStyle = .round
     path.lineWidth = width + max(1.5, width * 0.45)
-    NSColor.black.withAlphaComponent(0.85).setStroke()
+    markHalo(color).setStroke()
     path.stroke()
     path.lineWidth = width
-    NSColor.white.setStroke()
+    color.setStroke()
     path.stroke()
+}
+
+/// Тёмная пометка получает светлый контур, светлая — тёмный, чтобы её было видно на снимке.
+private func markHalo(_ color: NSColor) -> NSColor {
+    let rgb = color.usingColorSpace(.sRGB) ?? color
+    let luma = 0.3 * rgb.redComponent + 0.59 * rgb.greenComponent + 0.11 * rgb.blueComponent
+    if luma < 0.4 { return NSColor.white.withAlphaComponent(0.9) }
+    return NSColor.black.withAlphaComponent(0.85)
 }
 
 private func arrowHead(from: CGPoint, to: CGPoint, length: CGFloat) -> (CGPoint, CGPoint) {
@@ -275,6 +351,9 @@ final class ShotCanvasView: NSView, NSTextFieldDelegate {
     var imageSize: CGSize = .zero
     private(set) var marks: [ShotMark] = []
     var tool: ShotTool = .select { didSet { needsDisplay = true } }
+    var ink = ShotInk.white
+    var fontStep = 1
+    var onStyle: ((ShotInk, Double) -> Void)?
 
     private var selectedID: String?
     private var draft: ShotMark?
@@ -329,6 +408,7 @@ final class ShotCanvasView: NSView, NSTextFieldDelegate {
                 selectedID = mark.id
                 dragOrigin = point
                 dragOriginal = mark
+                onStyle?(mark.ink, mark.textSize)
             } else {
                 selectedID = nil
                 dragOrigin = nil
@@ -337,7 +417,7 @@ final class ShotCanvasView: NSView, NSTextFieldDelegate {
         case .text:
             beginText(at: viewPoint)
         default:
-            draft = ShotMark(id: UUID().uuidString, kind: kindName(tool), points: [ShotPoint(point)], text: "", textSize: textSize)
+            draft = ShotMark(id: UUID().uuidString, kind: kindName(tool), points: [ShotPoint(point)], text: "", textSize: textSize, ink: ink)
         }
         needsDisplay = true
     }
@@ -425,7 +505,8 @@ final class ShotCanvasView: NSView, NSTextFieldDelegate {
             kind: "text",
             points: [ShotPoint(point)],
             text: text,
-            textSize: textSize
+            textSize: textSize,
+            ink: ink
         )
         marks.append(mark)
         selectedID = mark.id
@@ -434,9 +515,10 @@ final class ShotCanvasView: NSView, NSTextFieldDelegate {
 
     private func beginText(at viewPoint: CGPoint) {
         textField?.removeFromSuperview()
-        let field = NSTextField(frame: NSRect(x: viewPoint.x, y: viewPoint.y, width: 220, height: 26))
-        field.font = UtkaChrome.font(max(13, CGFloat(textSize) * fitScale))
-        field.textColor = .white
+        let pointSize = max(13, CGFloat(textSize) * fitScale)
+        let field = NSTextField(frame: NSRect(x: viewPoint.x, y: viewPoint.y, width: 220, height: pointSize + 10))
+        field.font = UtkaChrome.font(pointSize)
+        field.textColor = ink.color
         field.backgroundColor = NSColor.black.withAlphaComponent(0.55)
         field.drawsBackground = true
         field.isBordered = false
@@ -452,7 +534,34 @@ final class ShotCanvasView: NSView, NSTextFieldDelegate {
         if history.count > 40 { history.removeFirst() }
     }
 
-    private var textSize: Double { Double(max(18, imageSize.width * 0.028)) }
+    /// Доли ширины картинки. Палитра переключает ступень, не произвольное число.
+    static let fontScales: [Double] = [0.018, 0.028, 0.042, 0.06]
+
+    private var textSize: Double {
+        let step = min(max(0, fontStep), Self.fontScales.count - 1)
+        return max(18, imageSize.width * Self.fontScales[step])
+    }
+
+    /// Новый цвет. Если пометка выбрана, красит и её.
+    func useInk(_ next: ShotInk) {
+        ink = next
+        guard let selectedID, let index = marks.firstIndex(where: { $0.id == selectedID }) else { return }
+        guard marks[index].ink != next else { return }
+        pushUndo()
+        marks[index].ink = next
+        needsDisplay = true
+    }
+
+    /// Новая величина текста. Выбранная надпись меняется сразу.
+    func useFontStep(_ step: Int) {
+        fontStep = min(max(0, step), Self.fontScales.count - 1)
+        guard let selectedID, let index = marks.firstIndex(where: { $0.id == selectedID }), marks[index].kind == "text" else { return }
+        let size = textSize
+        guard marks[index].textSize != size else { return }
+        pushUndo()
+        marks[index].textSize = size
+        needsDisplay = true
+    }
     private var slop: CGFloat { max(10, min(imageSize.width, imageSize.height) * 0.012) }
     private var fitScale: CGFloat { fittedRect().width / max(imageSize.width, 1) }
 
@@ -529,6 +638,109 @@ final class ShotWindow: NSWindow {
             return true
         }
         return super.performKeyEquivalent(with: event)
+    }
+}
+
+/// Тонкая черта между группами полосы.
+final class ShotBarDivider: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.white.withAlphaComponent(0.16).setFill()
+        NSRect(x: bounds.midX - 0.5, y: (bounds.height - 14) / 2, width: 1, height: 14).fill()
+    }
+}
+
+/// Подпись в полосе: по центру прямоугольника, гротеск продукта.
+private func drawBarSign(_ text: String, in rect: NSRect, size: CGFloat = 14) {
+    let font = UtkaChrome.font(size, weight: .medium)
+    let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UtkaChrome.ink]
+    let box = (text as NSString).size(withAttributes: attrs)
+    (text as NSString).draw(
+        at: NSPoint(x: rect.midX - box.width / 2, y: rect.midY - box.height / 2),
+        withAttributes: attrs
+    )
+}
+
+/// Цвета пометки.
+final class ShotStyleBar: NSView {
+    private var inkIndex = 0
+    var onInk: ((Int) -> Void)?
+
+    private static let swatch: CGFloat = 20
+
+    var preferredWidth: CGFloat { CGFloat(ShotInk.palette.count) * Self.swatch }
+
+    func reflect(inkIndex: Int) {
+        self.inkIndex = inkIndex
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        for (index, ink) in ShotInk.palette.enumerated() {
+            let cell = NSRect(x: CGFloat(index) * Self.swatch, y: 0, width: Self.swatch, height: bounds.height)
+            let dot = NSRect(x: cell.midX - 6, y: cell.midY - 6, width: 12, height: 12)
+            ink.color.setFill()
+            NSBezierPath(ovalIn: dot).fill()
+            let pale = ink.red > 0.92 && ink.green > 0.92 && ink.blue > 0.92
+            if index == inkIndex || pale {
+                let ring = NSBezierPath(ovalIn: dot.insetBy(dx: -2.5, dy: -2.5))
+                ring.lineWidth = 1
+                let tone = index == inkIndex ? NSColor.white : NSColor.white.withAlphaComponent(0.28)
+                (pale && index == inkIndex ? NSColor.white.withAlphaComponent(0.45) : tone).setStroke()
+                ring.stroke()
+            }
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(point) else { return }
+        inkIndex = min(ShotInk.palette.count - 1, max(0, Int(point.x / Self.swatch)))
+        needsDisplay = true
+        onInk?(inkIndex)
+    }
+}
+
+/// Ступень размера рядом с кнопкой текста.
+final class ShotFontBar: NSView {
+    private var fontStep = 1
+    var onFont: ((Int) -> Void)?
+
+    private static let labels = ["18", "28", "42", "60"]
+    private static let stepHit: CGFloat = 22
+    private static let labelWidth: CGFloat = 28
+
+    var preferredWidth: CGFloat { Self.stepHit + Self.labelWidth + Self.stepHit }
+
+    func reflect(fontStep: Int) {
+        self.fontStep = fontStep
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let minus = NSRect(x: 0, y: 0, width: Self.stepHit, height: bounds.height)
+        let labelBox = NSRect(x: minus.maxX, y: 0, width: Self.labelWidth, height: bounds.height)
+        let plus = NSRect(x: labelBox.maxX, y: 0, width: Self.stepHit, height: bounds.height)
+        drawBarSign("−", in: minus)
+        drawBarSign(Self.labels[min(fontStep, Self.labels.count - 1)], in: labelBox, size: 11)
+        drawBarSign("+", in: plus)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(point) else { return }
+        if point.x < Self.stepHit {
+            shift(-1)
+        } else if point.x >= Self.stepHit + Self.labelWidth {
+            shift(1)
+        }
+    }
+
+    private func shift(_ delta: Int) {
+        let next = min(ShotCanvasView.fontScales.count - 1, max(0, fontStep + delta))
+        guard next != fontStep else { return }
+        fontStep = next
+        needsDisplay = true
+        onFont?(next)
     }
 }
 
@@ -639,6 +851,11 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
     private let bar = NSView()
     private let status = UtkaChrome.label("", size: 11, color: UtkaChrome.dim)
     private var toolButtons: [NSButton] = []
+    private var undoButton: NSButton!
+    private let styleBar = ShotStyleBar()
+    private let fontBar = ShotFontBar()
+    private let toolDivider = ShotBarDivider()
+    private let actionDivider = ShotBarDivider()
     private let saveButton = SaveDiskButton()
     private var saving = false
 
@@ -665,7 +882,7 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
         window.isMovableByWindowBackground = false
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.minSize = NSSize(width: 520, height: 360)
+        window.minSize = NSSize(width: 640, height: 360)
         window.onUndo = { [weak self] in self?.canvas.undo() }
         buildChrome(marks: marks)
     }
@@ -692,6 +909,17 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
         canvas.image = picture
         canvas.imageSize = picture.size
         canvas.setMarks(marks)
+        canvas.onStyle = { [weak self] ink, size in
+            guard let self else { return }
+            let ratio = size / Double(max(self.canvas.imageSize.width, 1))
+            let step = ShotCanvasView.fontScales.enumerated().min {
+                abs($0.element - ratio) < abs($1.element - ratio)
+            }?.offset ?? self.canvas.fontStep
+            self.canvas.ink = ink
+            self.canvas.fontStep = step
+            self.styleBar.reflect(inkIndex: ShotInk.nearest(ink))
+            self.fontBar.reflect(fontStep: step)
+        }
 
         bar.wantsLayer = true
         let tools: [(ShotTool, String, String)] = [
@@ -709,10 +937,19 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
             bar.addSubview(button)
             return button
         }
-        let undoButton = toolButton(symbol: "arrow.uturn.backward", tip: "Отменить")
+        undoButton = toolButton(symbol: "arrow.uturn.backward", tip: "Отменить")
         undoButton.action = #selector(undoTapped)
+
+        styleBar.onInk = { [weak self] index in
+            guard ShotInk.palette.indices.contains(index) else { return }
+            self?.canvas.useInk(ShotInk.palette[index])
+        }
+        fontBar.onFont = { [weak self] step in self?.canvas.useFontStep(step) }
+        bar.addSubview(fontBar)
+        bar.addSubview(toolDivider)
+        bar.addSubview(styleBar)
+        bar.addSubview(actionDivider)
         bar.addSubview(undoButton)
-        toolButtons.append(undoButton)
 
         saveButton.onPress = { [weak self] in self?.saveTapped() }
         saveButton.onFrame = { [weak self] in self?.layoutChrome() }
@@ -742,14 +979,28 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
         let barH: CGFloat = 40
         bar.frame = NSRect(x: 0, y: 0, width: root.bounds.width, height: barH)
         canvas.frame = NSRect(x: 0, y: barH, width: root.bounds.width, height: max(0, root.bounds.height - barH))
-        var x: CGFloat = 10
+        let inset: CGFloat = 12
+        let slot = NSSize(width: 28, height: 28)
+        var x = inset
         for button in toolButtons {
-            button.frame = NSRect(x: x, y: 6, width: 28, height: 28)
+            button.frame = NSRect(origin: NSPoint(x: x, y: 6), size: slot)
             x += 32
+            if button.tag == ShotTool.text.rawValue {
+                fontBar.frame = NSRect(x: x - 4, y: 6, width: fontBar.preferredWidth, height: 28)
+                x = fontBar.frame.maxX + 4
+            }
         }
+        toolDivider.frame = NSRect(x: x + 6, y: 6, width: 1, height: 28)
+        let styleW = styleBar.preferredWidth
+        styleBar.frame = NSRect(x: toolDivider.frame.maxX + 12, y: 6, width: styleW, height: 28)
         let saveW = saveButton.preferredWidth
-        saveButton.frame = NSRect(x: bar.bounds.width - saveW - 12, y: 6, width: saveW, height: 28)
-        status.frame = NSRect(x: x + 8, y: 10, width: max(40, saveButton.frame.minX - x - 16), height: 18)
+        saveButton.frame = NSRect(x: bar.bounds.width - saveW - inset, y: 6, width: saveW, height: 28)
+        undoButton.frame = NSRect(x: saveButton.frame.minX - 8 - slot.width, y: 6, width: slot.width, height: slot.height)
+        actionDivider.frame = NSRect(x: undoButton.frame.minX - 14, y: 6, width: 1, height: 28)
+        let statusX = styleBar.frame.maxX + 12
+        let statusW = actionDivider.frame.minX - 12 - statusX
+        status.frame = NSRect(x: statusX, y: 11, width: max(0, statusW), height: 16)
+        status.isHidden = status.stringValue.isEmpty || statusW < 24
     }
 
     @objc private func toolTapped(_ sender: NSButton) {
@@ -763,28 +1014,34 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
         canvas.undo()
     }
 
+    /// Короткий статус в свободном месте полосы. Пустая строка прячет подпись.
+    private func noteStatus(_ text: String) {
+        status.stringValue = text
+        layoutChrome()
+    }
+
     private func saveTapped() {
         guard !saving else { return }
         let ownedPNG = UtkaPaths.ownsShot(fileURL.path) && fileURL.pathExtension.lowercased() == "png"
         let dest = ownedPNG ? fileURL : freshURL()
         if !FileManager.default.fileExists(atPath: ShotStore.baseURL(for: dest).path) {
             guard ShotStore.writeImage(source, to: ShotStore.baseURL(for: dest)) else {
-                status.stringValue = "Не записать"
+                noteStatus("Не записать")
                 return
             }
         }
         guard let data = flattenShot(image: source, marks: canvas.marks) else {
-            status.stringValue = "Не записать"
+            noteStatus("Не записать")
             return
         }
         do {
             try data.write(to: dest, options: .atomic)
         } catch {
-            status.stringValue = "Не записать"
+            noteStatus("Не записать")
             return
         }
         ShotStore.writeMarks(canvas.marks, beside: dest)
-        status.stringValue = ""
+        noteStatus("")
         if ownedPNG {
             ShotEditor.shelf?.noteFileChanged()
         } else {
