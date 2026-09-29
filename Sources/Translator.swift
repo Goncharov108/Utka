@@ -252,6 +252,13 @@ enum ShortcutTranslate {
     static func translate(_ text: String, toEnglish: Bool) -> Result<String, TranslateFailure> {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .success("") }
+        // Свой движок (utka-apps/utka-translate) — приоритетнее Apple: не зависит
+        // ни от региона, ни от компании, ни от интернета, если уже скачан.
+        if let native = NativeTranslate.translate(trimmed, toEnglish: toEnglish) {
+            if case .success(let value) = native, !value.isEmpty {
+                return .success(value)
+            }
+        }
         let system = SystemTextTranslate.translate(trimmed, toEnglish: toEnglish)
         if case .success(let value) = system, !value.isEmpty {
             return .success(value)

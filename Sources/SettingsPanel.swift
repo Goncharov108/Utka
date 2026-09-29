@@ -6,7 +6,12 @@ final class SettingsPanel: NSObject {
     private let body = SettingsBody()
     private let titleLabel = UtkaChrome.label("Настройки", size: 18, weight: .semibold)
     private let hints: [NSTextField]
-    private let languageTitle = UtkaChrome.label("Перевод", size: 13, weight: .semibold)
+    private let nativeTitle = UtkaChrome.label("Свой переводчик", size: 13, weight: .semibold)
+    private let nativeState = UtkaChrome.label("", size: 13, color: UtkaChrome.dim)
+    private let nativeButton = NSButton()
+    private let nativeNote = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
+    private var nativeDownloading = false
+    private let languageTitle = UtkaChrome.label("Перевод (запасной, через Apple)", size: 13, weight: .semibold)
     private let englishName = UtkaChrome.label("Английский", size: 13)
     private let englishState = UtkaChrome.label("", size: 13, color: UtkaChrome.dim)
     private let russianName = UtkaChrome.label("Русский", size: 13)
@@ -53,6 +58,11 @@ final class SettingsPanel: NSObject {
         languageNote.maximumNumberOfLines = 2
         languageNote.lineBreakMode = .byWordWrapping
         languageNote.cell?.wraps = true
+        nativeState.alignment = .right
+        nativeNote.maximumNumberOfLines = 2
+        nativeNote.lineBreakMode = .byWordWrapping
+        nativeNote.cell?.wraps = true
+        mount(nativeButton, title: "Скачать (≈150 МБ)", action: #selector(downloadNative))
         mount(languageButton, title: "Скачать английский и русский", action: #selector(downloadLanguages))
         updateLine.maximumNumberOfLines = 8
         updateLine.lineBreakMode = .byWordWrapping
@@ -61,6 +71,11 @@ final class SettingsPanel: NSObject {
         mount(installButton, title: "Установить", action: #selector(installUpdate))
         installButton.isHidden = true
         body.addSubview(titleLabel)
+        body.addSubview(nativeTitle)
+        body.addSubview(nativeState)
+        body.addSubview(nativeButton)
+        body.addSubview(nativeNote)
+        refreshNative()
         body.addSubview(languageTitle)
         body.addSubview(englishName)
         body.addSubview(englishState)
@@ -88,7 +103,39 @@ final class SettingsPanel: NSObject {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(body)
+        refreshNative()
         refreshLanguages()
+    }
+
+    /// Свой движок перевода: не Apple, не Google, не сторонний сервис —
+    /// utka-apps/utka-translate. Пока не скачан, Утка переводит через Apple
+    /// или через интернет как запасной путь.
+    private func refreshNative() {
+        let ready = NativeTranslate.isInstalled
+        nativeState.stringValue = ready ? "скачан" : "нет"
+        nativeState.textColor = ready ? UtkaChrome.ink : UtkaChrome.dim
+        nativeButton.isHidden = ready
+        nativeButton.isEnabled = !nativeDownloading
+        if ready {
+            nativeNote.stringValue = ""
+        }
+        body.needsLayout = true
+    }
+
+    @objc private func downloadNative() {
+        guard !nativeDownloading else { return }
+        nativeDownloading = true
+        nativeNote.stringValue = "Качаю…"
+        refreshNative()
+        NativeTranslate.download { [weak self] error in
+            guard let self else { return }
+            self.nativeDownloading = false
+            self.refreshNative()
+            if let error {
+                self.nativeNote.stringValue = error
+                self.body.needsLayout = true
+            }
+        }
     }
 
     /// Подписи «скачан» только по файлам. Кнопка скачивания — если какого-то пакета нет.
@@ -215,6 +262,18 @@ final class SettingsPanel: NSObject {
         for hint in hints {
             hint.frame = NSRect(x: text.minX, y: y, width: text.width, height: 16)
             y += 22
+        }
+        y += 10
+        nativeTitle.frame = NSRect(x: text.minX, y: y, width: text.width - 88, height: 16)
+        nativeState.frame = NSRect(x: text.maxX - 88, y: y, width: 88, height: 16)
+        y += 22
+        if !nativeButton.isHidden {
+            nativeButton.frame = NSRect(x: text.minX, y: y, width: nativeButton.frame.width + 8, height: 28)
+            y += 34
+        }
+        if !nativeNote.stringValue.isEmpty {
+            nativeNote.frame = NSRect(x: text.minX, y: y, width: text.width, height: 32)
+            y += 36
         }
         y += 10
         languageTitle.frame = NSRect(x: text.minX, y: y, width: text.width, height: 16)
