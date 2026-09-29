@@ -1,6 +1,25 @@
 import AppKit
 
-/// Страница окна настроек. На экране видна одна.
+/// Что стоит на верхней полосе островка. Оба особых режима сразу не живут.
+enum IslandBarMode: Int {
+    case plain
+    case sound
+    case search
+
+    private static let key = "islandBar"
+
+    /// Сохранённый режим. Без ключа полоса как раньше: ползунок и выходы.
+    static var current: IslandBarMode {
+        get {
+            guard let raw = UserDefaults.standard.object(forKey: key) as? Int,
+                  let mode = IslandBarMode(rawValue: raw) else { return .plain }
+            return mode
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: key)
+        }
+    }
+}
 private enum SettingsPage: Int {
     case island
     case translate
@@ -12,6 +31,8 @@ private enum SettingsPage: Int {
 final class SettingsPanel: NSObject {
     /// Сообщает полке, снимать ли свой снимок после переноса.
     var onDeleteShotAfterUse: ((Bool) -> Void)?
+    /// Меняет верхнюю полосу островка.
+    var onIslandBar: ((IslandBarMode) -> Void)?
 
     private let window: NSWindow
     private let body = SettingsBody()
@@ -30,6 +51,22 @@ final class SettingsPanel: NSObject {
     private let installButton = NSButton()
     private let shotCleanupLabel = UtkaChrome.label("Удалять скрин из полки после использования", size: 13)
     private let shotCleanup = NSSwitch()
+    private let soundLabel = UtkaChrome.label("Звук", size: 13, weight: .semibold)
+    private let soundSwitch = NSSwitch()
+    private let soundCaption = UtkaChrome.label(
+        "Плагин «Утка звук» нужен, чтобы одним кликом перенести звук между мониторами и наушниками; на одном мониторе он не нужен.",
+        size: 12,
+        color: UtkaChrome.dim
+    )
+    private let soundInstall = NSButton()
+    private let soundNote = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
+    private let soundReady = UtkaChrome.label("Плагин установлен", size: 13)
+    private let soundCheck = installedMark()
+    private let searchLabel = UtkaChrome.label("Поиск", size: 13, weight: .semibold)
+    private let searchSwitch = NSSwitch()
+    private let nativeReady = UtkaChrome.label("Языковой пакет установлен", size: 13)
+    private let nativeCheck = installedMark()
+    private var aligningSwitches = false
     private var canInstall = false
     private var checking = false
     private var installing = false
@@ -72,6 +109,16 @@ final class SettingsPanel: NSObject {
         shotCleanup.target = self
         shotCleanup.action = #selector(shotCleanupToggled)
         shotCleanup.state = ShelfModel.deleteShotAfterUse ? .on : .off
+        soundCaption.maximumNumberOfLines = 4
+        soundCaption.lineBreakMode = .byWordWrapping
+        soundCaption.cell?.wraps = true
+        soundNote.maximumNumberOfLines = 3
+        soundNote.lineBreakMode = .byWordWrapping
+        soundNote.cell?.wraps = true
+        mount(soundInstall, title: "Установить плагин звука", action: #selector(installSoundPlugin))
+        wire(soundSwitch, action: #selector(soundToggled))
+        wire(searchSwitch, action: #selector(searchToggled))
+        refreshIslandSwitches()
         body.addSubview(titleLabel)
         tabButtons = [
             makeTab("Островок", page: .island),
@@ -90,6 +137,17 @@ final class SettingsPanel: NSObject {
         body.addSubview(installButton)
         body.addSubview(shotCleanupLabel)
         body.addSubview(shotCleanup)
+        body.addSubview(soundLabel)
+        body.addSubview(soundSwitch)
+        body.addSubview(soundCaption)
+        body.addSubview(soundInstall)
+        body.addSubview(soundNote)
+        body.addSubview(soundReady)
+        body.addSubview(soundCheck)
+        body.addSubview(searchLabel)
+        body.addSubview(searchSwitch)
+        body.addSubview(nativeReady)
+        body.addSubview(nativeCheck)
         paintTabs()
         refreshNative()
     }
@@ -108,6 +166,7 @@ final class SettingsPanel: NSObject {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(body)
         shotCleanup.state = ShelfModel.deleteShotAfterUse ? .on : .off
+        refreshIslandSwitches()
         refreshNative()
         select(.island)
     }
@@ -145,10 +204,13 @@ final class SettingsPanel: NSObject {
     /// Показывает контролы только текущей вкладки.
     private func applyPageVisibility() {
         let translate = page == .translate
-        nativeTitle.isHidden = !translate
-        nativeState.isHidden = !translate
-        nativeNote.isHidden = !translate
-        nativeButton.isHidden = !translate || NativeTranslate.isInstalled
+        let pack = NativeTranslate.isInstalled
+        nativeReady.isHidden = !translate || !pack
+        nativeCheck.isHidden = !translate || !pack
+        nativeTitle.isHidden = !translate || pack
+        nativeState.isHidden = !translate || pack
+        nativeNote.isHidden = !translate || pack
+        nativeButton.isHidden = !translate || pack || NativeTranslate.isInstalled
         let updates = page == .updates
         versionLabel.isHidden = !updates
         updateButton.isHidden = !updates
@@ -158,6 +220,17 @@ final class SettingsPanel: NSObject {
         let shot = page == .shot
         shotCleanupLabel.isHidden = !shot
         shotCleanup.isHidden = !shot
+        let island = page == .island
+        let plugged = SoundPlugin.isInstalled
+        soundLabel.isHidden = !island
+        soundSwitch.isHidden = !island
+        soundCaption.isHidden = !island
+        soundInstall.isHidden = !island || plugged
+        soundNote.isHidden = !island || plugged || soundNote.stringValue.isEmpty
+        soundReady.isHidden = !island || !plugged
+        soundCheck.isHidden = !island || !plugged
+        searchLabel.isHidden = !island
+        searchSwitch.isHidden = !island
     }
 
     /// Переключает вкладку и поджимает окно под неё.
@@ -176,6 +249,68 @@ final class SettingsPanel: NSObject {
     /// Запоминает, снимать ли свой снимок с полки после переноса.
     @objc private func shotCleanupToggled() {
         onDeleteShotAfterUse?(shotCleanup.state == .on)
+    }
+
+    /// Включает звук на полосе и гасит поиск. Оба сразу остаются выключенными, если этот сняли.
+    @objc private func soundToggled() {
+        guard !aligningSwitches else { return }
+        aligningSwitches = true
+        if soundSwitch.state == .on {
+            searchSwitch.state = .off
+            IslandBarMode.current = .sound
+        } else {
+            IslandBarMode.current = .plain
+        }
+        aligningSwitches = false
+        onIslandBar?(IslandBarMode.current)
+    }
+
+    /// Включает поиск на полосе и гасит звук. Оба сразу остаются выключенными, если этот сняли.
+    @objc private func searchToggled() {
+        guard !aligningSwitches else { return }
+        aligningSwitches = true
+        if searchSwitch.state == .on {
+            soundSwitch.state = .off
+            IslandBarMode.current = .search
+        } else {
+            IslandBarMode.current = .plain
+        }
+        aligningSwitches = false
+        onIslandBar?(IslandBarMode.current)
+    }
+
+    /// Ставит тумблеры по сохранённому режиму. По умолчанию оба выключены.
+    private func refreshIslandSwitches() {
+        switch IslandBarMode.current {
+        case .sound:
+            soundSwitch.state = .on
+            searchSwitch.state = .off
+        case .search:
+            soundSwitch.state = .off
+            searchSwitch.state = .on
+        case .plain:
+            soundSwitch.state = .off
+            searchSwitch.state = .off
+        }
+    }
+
+    /// Просит плагин. Без релиза в системную папку ничего не пишет.
+    @objc private func installSoundPlugin() {
+        soundInstall.isEnabled = false
+        soundNote.stringValue = ""
+        SoundPlugin.install { [weak self] message in
+            guard let self else { return }
+            self.soundInstall.isEnabled = !SoundPlugin.isInstalled
+            self.soundNote.stringValue = message ?? ""
+            self.applyPageVisibility()
+            self.body.needsLayout = true
+        }
+    }
+
+    /// Тумблер с тем же гротеском, что и окно.
+    private func wire(_ toggle: NSSwitch, action: Selector) {
+        toggle.target = self
+        toggle.action = action
     }
 
     /// Свой офлайн-движок перевода: utka-apps/utka-translate. Единственный
@@ -326,7 +461,7 @@ final class SettingsPanel: NSObject {
         y = layoutTabs(x: text.minX, y: y) + 16
         switch page {
         case .island:
-            break
+            y = layoutIsland(text: text, y: y)
         case .translate:
             y = layoutTranslate(text: text, y: y)
         case .updates:
@@ -348,9 +483,75 @@ final class SettingsPanel: NSObject {
         return y + 22
     }
 
+    /// Звук и поиск. Включён может быть только один.
+    private func layoutIsland(text: NSRect, y: CGFloat) -> CGFloat {
+        var y = layoutToggle(soundLabel, soundSwitch, text: text, y: y) + 8
+        let captionHeight = measuredHeight(soundCaption.stringValue, width: text.width, font: soundCaption.font, limit: 72)
+        soundCaption.frame = NSRect(x: text.minX, y: y, width: text.width, height: captionHeight)
+        y += captionHeight + 10
+        if SoundPlugin.isInstalled {
+            y = layoutInstalled(soundReady, soundCheck, text: text, y: y)
+        } else {
+            soundInstall.isEnabled = true
+            soundInstall.frame = NSRect(x: text.minX, y: y, width: soundInstall.frame.width + 8, height: 28)
+            y += 34
+            if !soundNote.stringValue.isEmpty {
+                let noteHeight = measuredHeight(soundNote.stringValue, width: text.width, font: soundNote.font, limit: 48)
+                soundNote.frame = NSRect(x: text.minX, y: y, width: text.width, height: noteHeight)
+                y += noteHeight + 8
+            }
+        }
+        y += 8
+        return layoutToggle(searchLabel, searchSwitch, text: text, y: y)
+    }
+
+    /// Надпись «установлен» и зелёная галка.
+    private func layoutInstalled(_ label: NSTextField, _ mark: NSImageView, text: NSRect, y: CGFloat) -> CGFloat {
+        mark.frame = NSRect(x: text.minX, y: y, width: 18, height: 18)
+        label.frame = NSRect(x: text.minX + 24, y: y, width: text.width - 24, height: 18)
+        return y + 22
+    }
+
+    /// Зелёная галка у уже стоящего пакета или плагина.
+    private static func installedMark() -> NSImageView {
+        let view = NSImageView()
+        view.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Установлено")?
+            .withSymbolConfiguration(.init(pointSize: 15, weight: .semibold))
+        view.contentTintColor = .systemGreen
+        view.imageScaling = .scaleProportionallyUpOrDown
+        return view
+    }
+
+    /// Подпись слева, тумблер справа. Возвращает низ ряда.
+    private func layoutToggle(_ label: NSTextField, _ toggle: NSSwitch, text: NSRect, y: CGFloat) -> CGFloat {
+        let switchSize = toggle.fittingSize
+        let row = max(22, switchSize.height)
+        label.frame = NSRect(x: text.minX, y: y + (row - 18) / 2, width: max(40, text.width - switchSize.width - 12), height: 18)
+        toggle.frame = NSRect(
+            x: text.maxX - switchSize.width,
+            y: y + (row - switchSize.height) / 2,
+            width: switchSize.width,
+            height: switchSize.height
+        )
+        return y + row
+    }
+
+    /// Высота многострочной подписи.
+    private func measuredHeight(_ string: String, width: CGFloat, font: NSFont?, limit: CGFloat) -> CGFloat {
+        let measured = (string as NSString).boundingRect(
+            with: NSSize(width: width, height: limit),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font as Any]
+        )
+        return min(limit, max(16, ceil(measured.height)))
+    }
+
     /// Блок своего движка перевода.
     private func layoutTranslate(text: NSRect, y: CGFloat) -> CGFloat {
         var y = y
+        if NativeTranslate.isInstalled {
+            return layoutInstalled(nativeReady, nativeCheck, text: text, y: y)
+        }
         nativeTitle.frame = NSRect(x: text.minX, y: y, width: text.width - 88, height: 16)
         nativeState.frame = NSRect(x: text.maxX - 88, y: y, width: 88, height: 16)
         y += 22

@@ -34,6 +34,9 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         hover = HoverMonitor()
         panel = IslandPanel(shelf: shelfView, clipboard: clipboardView, presets: presetsView, translator: translator, mark: mark)
+        settings.onIslandBar = { [weak panel] mode in
+            panel?.setBar(mode)
+        }
         panel.bindActions(target: self, action: #selector(sectionClicked(_:)))
         panel.onSection = { [weak self] section in
             if section == .presets { self?.presetsView.refresh() }
@@ -217,6 +220,7 @@ enum SelfCheck {
         checkBookmark()
         checkClipboard()
         checkMark()
+        checkSpot()
         if failed {
             fputs("SELF-CHECK FAILED\n", stderr)
         } else {
@@ -277,6 +281,42 @@ enum SelfCheck {
         }
         if history.items.count != 50 { fail("лимит \(history.items.count)") }
         if history.items.first?.text != "n54" { fail("порядок") }
+    }
+
+    /// Счёт и единицы отвечают сразу, без индекса Spotlight.
+    private static func checkSpot() {
+        let search = IslandSearch()
+        let calc = search.preview("2+2")
+        if calc.first?.title != "4" || calc.first?.detail != "Калькулятор" {
+            fail("калькулятор \(calc.map(\.title))")
+        }
+        let units = search.preview("10 км в м")
+        if !units.contains(where: { $0.detail == "Перевод единиц" && $0.title.hasPrefix("10000") }) {
+            fail("единицы \(units.map(\.title))")
+        }
+        if !search.preview("   ").isEmpty { fail("пустой запрос") }
+        if !search.preview("2").isEmpty { fail("одиночная цифра не счёт") }
+        let ranked = IslandSearch.ordered(
+            [
+                IslandHit(title: "определение", detail: "Словарь", url: nil, copy: nil),
+                IslandHit(title: "сеть", detail: "Сеть", url: nil, copy: nil)
+            ],
+            [
+                IslandHit(title: "Safari", detail: "Программа", url: nil, copy: nil),
+                IslandHit(title: "чек", detail: "Файл", url: nil, copy: nil)
+            ]
+        )
+        if ranked.map(\.title) != ["Safari", "определение", "чек", "сеть"] {
+            fail("порядок \(ranked.map(\.title))")
+        }
+        if IslandSearch.acceptsPath("/Library/Receipts/com.apple.pkg.Safari.bom") { fail("чек в списке") }
+        if !IslandSearch.acceptsPath("/Applications/Safari.app") { fail("программа отсечена") }
+        var last: [String] = ["x"]
+        search.onHits = { hits in last = hits.map(\.title) }
+        search.lookup("2+2")
+        if last.first != "4" { fail("живой счёт \(last)") }
+        search.lookup("")
+        if !last.isEmpty { fail("очистка не гасит список") }
     }
 
     private static func checkMark() {

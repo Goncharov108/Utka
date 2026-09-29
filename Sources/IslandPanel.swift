@@ -312,9 +312,14 @@ private final class VolumeSlider: NSSlider {
 final class SoundStrip: NSView {
     private let muteButton = NSButton()
     private let slider = VolumeSlider()
+    private let searchField = NSSearchField()
     private var deviceButtons: [NSButton] = []
     private var shown: [AudioOutput.Sink] = []
     private var trackingVolume = false
+    private var mode = IslandBarMode.current
+    var onLookup: ((String) -> Void)?
+    var onMove: ((Int) -> Void)?
+    var onCommit: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -341,6 +346,15 @@ final class SoundStrip: NSView {
         }
         addSubview(slider)
 
+        searchField.font = UtkaChrome.font(12)
+        searchField.textColor = UtkaChrome.ink
+        searchField.placeholderString = "Поиск Spotlight"
+        searchField.focusRingType = .none
+        searchField.sendsSearchStringImmediately = true
+        searchField.sendsWholeSearchString = true
+        searchField.delegate = self
+        addSubview(searchField)
+
         AudioOutput.shared.onChange = { [weak self] in self?.apply() }
         AudioOutput.shared.start()
     }
@@ -353,18 +367,45 @@ final class SoundStrip: NSView {
         }
     }
 
-    /// Раскладывает значок, ползунок и кнопки выходов по ширине полосы.
+    /// Поиск ставит поле на место выходов. Звук мониторы не прячет.
+    func setMode(_ mode: IslandBarMode) {
+        self.mode = mode
+        if mode != .search {
+            searchField.stringValue = ""
+            onLookup?("")
+        }
+        place()
+    }
+
+    /// Прямоугольник поля в координатах островка.
+    func fieldFrame(in view: NSView) -> NSRect? {
+        guard mode == .search, !searchField.isHidden, searchField.bounds.width > 1 else { return nil }
+        return searchField.convert(searchField.bounds, to: view)
+    }
+
+    /// Ползунок и мониторы остаются. Поиск занимает только место кнопок выходов.
     private func place() {
+        let searching = mode == .search
+        muteButton.isHidden = false
+        slider.isHidden = false
+        searchField.isHidden = !searching
+        for button in deviceButtons {
+            button.isHidden = searching
+        }
         let bar = bounds.height
         muteButton.frame = NSRect(x: 0, y: (bar - 24) / 2, width: 24, height: 24)
         let sliderWidth = min(120, max(72, bounds.width * 0.22))
         slider.frame = NSRect(x: 28, y: (bar - 18) / 2, width: sliderWidth, height: 18)
+        let origin = slider.frame.maxX + 8
+        let available = bounds.width - origin
+        if searching {
+            searchField.frame = NSRect(x: origin, y: (bar - 22) / 2, width: max(40, available), height: 22)
+            return
+        }
         let count = deviceButtons.count
         guard count > 0 else { return }
         let gap: CGFloat = 4
-        let origin = slider.frame.maxX + 8
         let slots = CGFloat(count)
-        let available = bounds.width - origin
         let width = max(0, (available - gap * (slots - 1)) / slots)
         var x = origin
         for button in deviceButtons {
@@ -459,6 +500,29 @@ final class SoundStrip: NSView {
     }
 }
 
+/// Поле поиска: набор текста, стрелки и Enter. Command+пробел не перехватывает.
+extension SoundStrip: NSSearchFieldDelegate {
+    func controlTextDidChange(_ obj: Notification) {
+        onLookup?(searchField.stringValue)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.moveDown(_:)) {
+            onMove?(1)
+            return true
+        }
+        if commandSelector == #selector(NSResponder.moveUp(_:)) {
+            onMove?(-1)
+            return true
+        }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            onCommit?()
+            return true
+        }
+        return false
+    }
+}
+
 /// Островок у верхнего края выбранного экрана.
 final class IslandPanel {
     let window: KeyPanel
@@ -468,6 +532,8 @@ final class IslandPanel {
     /// Верхняя полоса на все разделы. Сюда сядут кнопки, подпись раздела не нужна.
     private let topBar = NSView()
     private let soundStrip = SoundStrip()
+    private let spot = IslandSearch()
+    private let searchDrop = SearchDrop()
     private let shotButton = NSButton()
     private let shotTarget = ShotButtonTarget()
     private let body = NSView()
@@ -484,6 +550,24 @@ final class IslandPanel {
     var onSection: ((IslandSection) -> Void)?
     var onCapture: (() -> Void)?
     var onSettings: (() -> Void)?
+
+    /// Меняет полосу, кнопку снимка не двигает.
+    func setBar(_ mode: IslandBarMode) {
+        soundStrip.setMode(mode)
+        if mode != .search { searchDrop.show([]) }
+    }
+
+    /// Список Spotlight под полем, не задевая кнопку снимка.
+    private func placeSearchDrop() {
+        guard !searchDrop.isHidden, let anchor = soundStrip.fieldFrame(in: root) else {
+            searchDrop.isHidden = true
+            return
+        }
+        let area = body.frame
+        let top = min(anchor.minY - 4, area.maxY)
+        let fitted = min(searchDrop.neededHeight, max(32, top - area.minY))
+        searchDrop.frame = NSRect(x: area.minX, y: top - fitted, width: area.width, height: fitted)
+    }
 
     init(shelf: NSView, clipboard: NSView, presets: NSView, translator: NSView, mark: NSImage?) {
         sections = [shelf, clipboard, presets, translator]
@@ -552,6 +636,18 @@ final class IslandPanel {
         root.addSubview(rail)
         root.addSubview(topBar)
         root.addSubview(body)
+        root.addSubview(searchDrop)
+        spot.onHits = { [weak self] hits in
+            self?.searchDrop.show(hits)
+            self?.placeSearchDrop()
+        }
+        searchDrop.onPick = { hit in IslandSearch.open(hit) }
+        soundStrip.onLookup = { [weak self] text in self?.spot.lookup(text) }
+        soundStrip.onMove = { [weak self] delta in self?.searchDrop.move(delta) }
+        soundStrip.onCommit = { [weak self] in
+            guard let hit = self?.searchDrop.current() else { return }
+            IslandSearch.open(hit)
+        }
         showSection(.shelf)
 
         root.postsFrameChangedNotifications = true
@@ -580,6 +676,7 @@ final class IslandPanel {
                 visible.frame = self.body.bounds
                 visible.resizeSubviews(withOldSize: visible.bounds.size)
             }
+            self.placeSearchDrop()
         }
         NotificationCenter.default.post(name: NSView.frameDidChangeNotification, object: root)
         markView.onClick = { [weak self] in self?.onSettings?() }
