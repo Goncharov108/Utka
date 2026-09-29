@@ -159,26 +159,15 @@ final class SettingsPanel: NSObject {
         label.textColor = ready ? UtkaChrome.ink : UtkaChrome.dim
     }
 
-    /// Сначала пробует скачать сама, тихо. Если не вышло — сама же открывает
-    /// нужную страницу настроек, без второй кнопки и лишнего клика.
+    /// Сразу открывает системные настройки языка — без попытки скачать через
+    /// приватный API Apple. Тот путь надёжной проверкой не защитить: если
+    /// загрузка в регионе недоступна, сбой происходит внутри самого закрытого
+    /// кода Apple и роняет всё приложение, а не только эту попытку — уже
+    /// после того, как снаружи все проверки пройдены. Дважды проверено вживую.
     @objc private func downloadLanguages() {
-        guard !downloading else { return }
-        downloading = true
-        languageNote.stringValue = "Качаю…"
-        refreshLanguages()
-        LanguagePacks.download { [weak self] error in
-            guard let self else { return }
-            self.downloading = false
-            self.refreshLanguages()
-            let ready = LanguagePacks.items().allSatisfy(\.ready)
-            if ready {
-                self.languageNote.stringValue = ""
-                return
-            }
-            self.languageNote.stringValue = "Открываю настройки языка — довершите загрузку там"
-            self.body.needsLayout = true
-            ShortcutTranslate.openLanguageSettings()
-        }
+        languageNote.stringValue = "Открываю настройки языка — там и качается"
+        body.needsLayout = true
+        ShortcutTranslate.openLanguageSettings()
     }
 
     /// Сверяет сборку с общим main и показывает, что именно готово.
