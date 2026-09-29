@@ -436,8 +436,6 @@ final class SoundStrip: NSView {
         sourcesButton.isBordered = false
         sourcesButton.imagePosition = .imageOnly
         sourcesButton.imageScaling = .scaleProportionallyDown
-        sourcesButton.image = NSImage(systemSymbolName: "hifispeaker", accessibilityDescription: "Источники звука")?
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
         sourcesButton.toolTip = "Источники звука"
         sourcesButton.target = self
         sourcesButton.action = #selector(sourcesClicked)
@@ -500,26 +498,28 @@ final class SoundStrip: NSView {
         return sourcesButton.convert(sourcesButton.bounds, to: view)
     }
 
-    /// Громкость слева. Дальше кнопка источников, если звук включён, и поле поиска.
+    /// Слева значок выхода, затем колонка беззвучия, ползунок и поиск.
     private func place() {
         let bar = bounds.height
         muteButton.isHidden = false
         slider.isHidden = false
-        muteButton.frame = NSRect(x: 0, y: (bar - 24) / 2, width: 24, height: 24)
-        let sliderWidth = min(120, max(72, bounds.width * 0.22))
-        slider.frame = NSRect(x: 28, y: (bar - 18) / 2, width: sliderWidth, height: 18)
-        var origin = slider.frame.maxX + 8
+        var origin: CGFloat = 0
         sourcesButton.isHidden = !soundOn
         if soundOn {
             sourcesButton.frame = NSRect(x: origin, y: (bar - 24) / 2, width: 24, height: 24)
             origin += 32
         }
+        muteButton.frame = NSRect(x: origin, y: (bar - 24) / 2, width: 24, height: 24)
+        origin += 28
+        let sliderWidth = min(120, max(72, bounds.width * 0.22))
+        slider.frame = NSRect(x: origin, y: (bar - 18) / 2, width: sliderWidth, height: 18)
+        origin = slider.frame.maxX + 8
         searchField.isHidden = !searchOn
         guard searchOn else { return }
         searchField.frame = NSRect(x: origin, y: (bar - 22) / 2, width: max(40, bounds.width - origin), height: 22)
     }
 
-    /// Подтягивает громкость и значок текущего выхода.
+    /// Подтягивает громкость, колонку беззвучия и значок текущего выхода.
     private func apply() {
         let audio = AudioOutput.shared
         slider.isEnabled = audio.canAdjustVolume
@@ -529,21 +529,35 @@ final class SoundStrip: NSView {
             slider.doubleValue = Double(audio.volume)
         }
         muteButton.isEnabled = audio.canMute
-        let sink = audio.sinks.first { $0.id == audio.currentID }
-        let symbol = sink?.symbol ?? "speaker.wave.2"
-        muteButton.toolTip = sink?.name ?? "Беззвучие"
-        muteButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: sink?.name ?? "Выход")?
+        muteButton.toolTip = "Беззвучие"
+        let symbol = speakerSymbol(volume: audio.volume, muted: audio.muted, adjustable: audio.canAdjustVolume || audio.canMute)
+        muteButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Громкость")?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
-        muteButton.contentTintColor = audio.muted || !muteButton.isEnabled ? UtkaChrome.dim : UtkaChrome.ink
+        muteButton.contentTintColor = muteButton.isEnabled ? UtkaChrome.ink : UtkaChrome.dim
         paintSourcesButton()
         onAudio?()
     }
 
-    /// Кружок справа от громкости. Открытый список красится акцентом.
+    /// Кружок слева от ползунка. Значок — Мак, монитор или наушники.
     private func paintSourcesButton() {
+        let audio = AudioOutput.shared
+        let sink = audio.sinks.first { $0.id == audio.currentID }
+        let symbol = sink?.symbol ?? "laptopcomputer"
+        sourcesButton.toolTip = sink?.name ?? "Источники звука"
+        sourcesButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: sink?.name ?? "Источники звука")?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
         let color = sourcesOpen ? IslandLook.accent : UtkaChrome.ink
         sourcesButton.contentTintColor = color
         sourcesButton.layer?.backgroundColor = (sourcesOpen ? IslandLook.accent.withAlphaComponent(0.22) : UtkaChrome.card).cgColor
+    }
+
+    /// Значок динамика по громкости и беззвучию.
+    private func speakerSymbol(volume: Float, muted: Bool, adjustable: Bool) -> String {
+        if !adjustable { return "speaker.wave.2" }
+        if muted || volume <= 0.001 { return "speaker.slash" }
+        if volume < 0.33 { return "speaker" }
+        if volume < 0.66 { return "speaker.wave.1" }
+        return "speaker.wave.2"
     }
 
     @objc private func sourcesClicked() {
