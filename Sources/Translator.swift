@@ -39,12 +39,16 @@ enum SystemTextTranslate {
         }
         let source = toEnglish ? "ru_RU" : "en_US"
         let target = toEnglish ? "en_US" : "ru_RU"
-        guard let session = maker(
-            getter(cls, sel_registerName("alloc"))!,
-            initSelector,
-            NSLocale(localeIdentifier: source),
-            NSLocale(localeIdentifier: target)
-        ), let sessionObject = session as? NSObject else {
+        // alloc может вернуть nil там, где офлайн-перевод недоступен
+        // (например, из-за региональных ограничений) — раньше это било
+        // принудительным разворотом (!) и роняло всё приложение.
+        guard let allocated = getter(cls, sel_registerName("alloc")),
+              let session = maker(
+                allocated,
+                initSelector,
+                NSLocale(localeIdentifier: source),
+                NSLocale(localeIdentifier: target)
+              ), let sessionObject = session as? NSObject else {
             return .failure(TranslateFailure(message: "language"))
         }
         let flagSelector = Selector(("setAllowOnlineTranslation:"))
@@ -121,7 +125,11 @@ enum LanguagePacks {
         }
         let initSelector = Selector(("initWithSourceLocale:targetLocale:"))
         let fetchSelector = Selector(("_downloadAssetForLanguagePair:userInitiated:completion:"))
-        guard cls.instancesRespond(to: initSelector), translator.instancesRespond(to: fetchSelector) else {
+        // _downloadAssetForLanguagePair:… вызывается на самом классе _LTTranslator,
+        // а не на его экземпляре, поэтому проверять нужно responds(to:) у класса
+        // как объекта, а не instancesRespond(to:) — иначе проверка ничего не значит.
+        guard cls.instancesRespond(to: initSelector),
+              (translator as AnyObject).responds(to: fetchSelector) else {
             completion("Нет системного перевода")
             return
         }
@@ -131,12 +139,15 @@ enum LanguagePacks {
         let getter = unsafeBitCast(raw, to: Getter.self)
         let maker = unsafeBitCast(raw, to: Maker.self)
         let fetch = unsafeBitCast(raw, to: Fetch.self)
-        guard let pair = maker(
-            getter(cls, sel_registerName("alloc"))!,
-            initSelector,
-            NSLocale(localeIdentifier: "en_US"),
-            NSLocale(localeIdentifier: "ru_RU")
-        ) else {
+        // alloc может вернуть nil там, где загрузка недоступна — раньше это било
+        // принудительным разворотом (!) и роняло всё приложение целиком.
+        guard let allocated = getter(cls, sel_registerName("alloc")),
+              let pair = maker(
+                allocated,
+                initSelector,
+                NSLocale(localeIdentifier: "en_US"),
+                NSLocale(localeIdentifier: "ru_RU")
+              ) else {
             completion("Не удалось начать загрузку")
             return
         }
