@@ -68,8 +68,16 @@ final class SettingsPanel: NSObject {
     private let lookMode = NSSegmentedControl()
     private let glassLabel = UtkaChrome.label("Стекло", size: 13, weight: .semibold)
     private let glassSlider = NSSlider()
-    private let accentLabel = UtkaChrome.label("Цвет", size: 13, weight: .semibold)
+    private let accentLabel = UtkaChrome.label("Цвет элементов", size: 13, weight: .semibold)
     private let accentWell = NSColorWell()
+    private let strokeLabel = UtkaChrome.label("Обводка", size: 13, weight: .semibold)
+    private let strokeSwitch = NSSwitch()
+    private let strokeColorLabel = UtkaChrome.label("Цвет обводки", size: 13, weight: .semibold)
+    private let strokeWell = NSColorWell()
+    /// Стекло и вуаль окна, как у капли.
+    private let chrome = SettingsChrome()
+    /// Обводка по краю окна, если она включена.
+    private let strokeOverlay = SettingsStroke()
     private let nativeReady = UtkaChrome.label("Языковой пакет установлен", size: 13)
     private let nativeCheck = installedMark()
     private var aligningSwitches = false
@@ -89,14 +97,17 @@ final class SettingsPanel: NSObject {
         window.title = "Настройки"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.backgroundColor = IslandLook.solid
+        window.titlebarSeparatorStyle = .none
+        window.isOpaque = false
+        window.backgroundColor = .clear
         window.appearance = IslandLook.appearance
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
         window.level = .popUpMenu
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         body.arrange = { [weak self] in self?.layoutContents() }
-        window.contentView = body
+        chrome.install(body: body, stroke: strokeOverlay)
+        window.contentView = chrome
         nativeState.alignment = .right
         nativeNote.maximumNumberOfLines = 2
         nativeNote.lineBreakMode = .byWordWrapping
@@ -140,8 +151,21 @@ final class SettingsPanel: NSObject {
         glassSlider.target = self
         glassSlider.action = #selector(glassChanged)
         accentWell.color = IslandLook.accent
+        accentWell.isContinuous = true
         accentWell.target = self
         accentWell.action = #selector(accentChanged)
+        wire(strokeSwitch, action: #selector(strokeToggled))
+        strokeSwitch.state = IslandLook.strokeOn ? .on : .off
+        strokeWell.color = IslandLook.strokeColor
+        strokeWell.isContinuous = true
+        strokeWell.target = self
+        strokeWell.action = #selector(strokeColorChanged)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(panelColorChanged),
+            name: NSColorPanel.colorDidChangeNotification,
+            object: NSColorPanel.shared
+        )
         refreshIslandSwitches()
         body.addSubview(titleLabel)
         tabButtons = [
@@ -176,6 +200,10 @@ final class SettingsPanel: NSObject {
         body.addSubview(glassSlider)
         body.addSubview(accentLabel)
         body.addSubview(accentWell)
+        body.addSubview(strokeLabel)
+        body.addSubview(strokeSwitch)
+        body.addSubview(strokeColorLabel)
+        body.addSubview(strokeWell)
         body.addSubview(nativeReady)
         body.addSubview(nativeCheck)
         paintTabs()
@@ -209,6 +237,8 @@ final class SettingsPanel: NSObject {
         button.title = title
         button.tag = page.rawValue
         button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 6
         button.target = self
         button.action = #selector(tabClicked(_:))
         body.addSubview(button)
@@ -226,9 +256,10 @@ final class SettingsPanel: NSObject {
                 string: title,
                 attributes: [
                     .font: UtkaChrome.font(13, weight: on ? .semibold : .medium),
-                    .foregroundColor: on ? UtkaChrome.ink : UtkaChrome.dim
+                    .foregroundColor: on ? IslandLook.accent : UtkaChrome.dim
                 ]
             )
+            button.layer?.backgroundColor = (on ? IslandLook.accent.withAlphaComponent(0.22) : NSColor.clear).cgColor
             button.sizeToFit()
         }
     }
@@ -269,6 +300,11 @@ final class SettingsPanel: NSObject {
         glassSlider.isHidden = !island
         accentLabel.isHidden = !island
         accentWell.isHidden = !island
+        strokeLabel.isHidden = !island
+        strokeSwitch.isHidden = !island
+        let stroke = island && IslandLook.strokeOn
+        strokeColorLabel.isHidden = !stroke
+        strokeWell.isHidden = !stroke
     }
 
     /// Переключает вкладку и поджимает окно под неё.
@@ -552,12 +588,20 @@ final class SettingsPanel: NSObject {
         lookMode.frame = NSRect(x: text.minX, y: y, width: text.width, height: 24)
         y += 34
         let sliderWidth = min(180, text.width * 0.46)
-        glassLabel.frame = NSRect(x: text.minX, y: y, width: text.width - sliderWidth - 12, height: 18)
-        glassSlider.frame = NSRect(x: text.maxX - sliderWidth, y: y, width: sliderWidth, height: 18)
-        y += 28
-        accentWell.frame = NSRect(x: text.maxX - 44, y: y - 2, width: 44, height: 24)
-        accentLabel.frame = NSRect(x: text.minX, y: y, width: text.width - 56, height: 18)
-        return y + 24
+        glassLabel.frame = NSRect(x: text.minX, y: y + 5, width: text.width - sliderWidth - 12, height: 18)
+        glassSlider.frame = NSRect(x: text.maxX - sliderWidth, y: y, width: sliderWidth, height: 28)
+        y += 40
+        y = layoutColor(accentLabel, accentWell, text: text, y: y) + 12
+        y = layoutToggle(strokeLabel, strokeSwitch, text: text, y: y)
+        guard IslandLook.strokeOn else { return y + 8 }
+        return layoutColor(strokeColorLabel, strokeWell, text: text, y: y + 12) + 8
+    }
+
+    /// Подпись слева, лунка цвета справа. Высота с запасом, чтобы кружок не срезало.
+    private func layoutColor(_ label: NSTextField, _ well: NSColorWell, text: NSRect, y: CGFloat) -> CGFloat {
+        well.frame = NSRect(x: text.maxX - 44, y: y, width: 44, height: 28)
+        label.frame = NSRect(x: text.minX, y: y + 5, width: text.width - 56, height: 18)
+        return y + 28
     }
 
     @objc private func lookModeChanged() {
@@ -573,23 +617,45 @@ final class SettingsPanel: NSObject {
         IslandLook.accent = accentWell.color
     }
 
+    @objc private func strokeToggled() {
+        IslandLook.strokeOn = strokeSwitch.state == .on
+    }
+
+    @objc private func strokeColorChanged() {
+        IslandLook.strokeColor = strokeWell.color
+    }
+
+    /// Пока крутят цвет в панели, островок и это окно меняются сразу.
+    @objc private func panelColorChanged() {
+        let color = NSColorPanel.shared.color
+        if accentWell.isActive {
+            IslandLook.accent = color
+        } else if strokeWell.isActive {
+            IslandLook.strokeColor = color
+        }
+    }
+
     /// Окно настроек тем же режимом, что островок.
     @objc private func lookChanged() {
         paintChrome()
         body.needsLayout = true
     }
 
-    /// Чернила подписей и фон окна.
+    /// Чернила, стекло и обводка — тем же видом, что островок.
     private func paintChrome() {
         window.appearance = IslandLook.appearance
-        window.backgroundColor = IslandLook.solid
-        let inkLabels = [titleLabel, soundLabel, searchLabel, soundReady, nativeReady, nativeTitle, versionLabel, shotCleanupLabel, lookLabel, glassLabel, accentLabel]
+        window.backgroundColor = .clear
+        chrome.apply()
+        strokeOverlay.needsDisplay = true
+        let inkLabels = [titleLabel, soundLabel, searchLabel, soundReady, nativeReady, nativeTitle, versionLabel, shotCleanupLabel, lookLabel, glassLabel, accentLabel, strokeLabel, strokeColorLabel]
         inkLabels.forEach { $0.textColor = UtkaChrome.ink }
         let dimLabels = [soundCaption, soundNote, nativeNote, nativeState, updateLine]
         dimLabels.forEach { $0.textColor = UtkaChrome.dim }
         lookMode.selectedSegment = IslandLook.mode.rawValue
         glassSlider.doubleValue = IslandLook.glass
-        accentWell.color = IslandLook.accent
+        if !accentWell.isActive { accentWell.color = IslandLook.accent }
+        strokeSwitch.state = IslandLook.strokeOn ? .on : .off
+        if !strokeWell.isActive { strokeWell.color = IslandLook.strokeColor }
         paintTabs()
     }
 
@@ -712,13 +778,75 @@ final class SettingsPanel: NSObject {
 
     /// Держит верх окна на месте и убирает пустоту под последней строкой.
     private func fitWindow(contentBottom: CGFloat) {
-        let height = contentBottom + 28
+        let height = contentBottom + 40
         let frame = window.frame
         guard abs(frame.height - height) > 1 else { return }
         let top = frame.maxY
         window.setFrame(NSRect(x: frame.minX, y: top - height, width: frame.width, height: height), display: true)
     }
 
+}
+
+/// Матовое стекло окна. Плотность вуали та же, что у капли.
+private final class SettingsChrome: NSVisualEffectView {
+    private let veil = NSView()
+    private weak var body: NSView?
+    private weak var stroke: NSView?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        blendingMode = .behindWindow
+        state = .active
+        material = .hudWindow
+        veil.wantsLayer = true
+        addSubview(veil)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    /// Кладёт содержимое и обводку поверх стекла.
+    func install(body: NSView, stroke: NSView) {
+        self.body = body
+        self.stroke = stroke
+        addSubview(body)
+        addSubview(stroke)
+    }
+
+    override func layout() {
+        super.layout()
+        veil.frame = bounds
+        body?.frame = bounds
+        stroke?.frame = bounds
+        if let stroke, subviews.last !== stroke {
+            addSubview(stroke, positioned: .above, relativeTo: nil)
+        }
+    }
+
+    /// Подтягивает материал и плотность под текущий вид.
+    func apply() {
+        material = IslandLook.dark ? .hudWindow : .menu
+        appearance = IslandLook.appearance
+        isHidden = false
+        veil.layer?.backgroundColor = IslandLook.veil.cgColor
+    }
+}
+
+/// Обводка по краю окна. Клики проходят к контролам.
+private final class SettingsStroke: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard IslandLook.strokeOn else { return }
+        let width: CGFloat = 2.5
+        let path = NSBezierPath(
+            roundedRect: bounds.insetBy(dx: width / 2 + 1, dy: width / 2 + 1),
+            xRadius: 12,
+            yRadius: 12
+        )
+        path.lineWidth = width
+        IslandLook.strokeColor.setStroke()
+        path.stroke()
+    }
 }
 
 /// Фон окна настроек. Escape закрывает.

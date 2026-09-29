@@ -66,6 +66,21 @@ final class KeyPanel: NSPanel {
     }
 }
 
+/// Обводка капли. Клики проходят к кнопкам под ней.
+private final class DropStroke: NSView {
+    override func makeBackingLayer() -> CALayer { CAShapeLayer() }
+    var line: CAShapeLayer { layer as! CAShapeLayer }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 /// Чёрная капля: верхние углы выпуклые, плашка шире книзу и держится за кромку.
 final class IslandRoot: NSView {
     /// Радиус ушей. Бок кончается на той же дуге, иначе контур рвётся.
@@ -84,6 +99,8 @@ final class IslandRoot: NSView {
     private let veil = NSView()
     private let frostMask = CAShapeLayer()
     private let veilMask = CAShapeLayer()
+    /// Обводка поверх вуали. Сама заливка её не закрывает.
+    private let strokeHost = DropStroke()
     private var plantedGlass = false
     private var wasDark = IslandLook.dark
     /// Нижняя дуга выше кромки окна, прямоугольник её не срезает.
@@ -145,8 +162,25 @@ final class IslandRoot: NSView {
         clip.path = islandSilhouette(bounds: clipBounds, ear: earRadius, bottom: bottomRadius)
         frostMask.path = clip.path
         veilMask.path = clip.path
+        if let path = clip.path { placeStroke(path: path, screen: screen) }
         layer?.mask = clip
         CATransaction.commit()
+    }
+
+    /// Линия по силуэту поверх заливки. Маска капли оставляет внутреннюю половину.
+    private func placeStroke(path: CGPath, screen: CGFloat) {
+        if strokeHost.superview == nil {
+            addSubview(strokeHost, positioned: .above, relativeTo: nil)
+        }
+        strokeHost.frame = bounds
+        let line = strokeHost.line
+        line.frame = bounds
+        line.path = path
+        line.fillColor = nil
+        line.lineJoin = .round
+        line.lineWidth = IslandLook.strokeOn ? 5 : 0
+        line.strokeColor = IslandLook.strokeOn ? IslandLook.strokeColor.cgColor : nil
+        line.contentsScale = screen
     }
 
     /// Стекло и вуаль под содержимым, в той же маске капли.

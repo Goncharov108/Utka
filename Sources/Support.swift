@@ -111,6 +111,8 @@ enum IslandLook {
     private static let modeKey = "islandLookMode"
     private static let glassKey = "islandGlass"
     private static let accentKey = "islandAccent"
+    private static let strokeKey = "islandStroke"
+    private static let strokeColorKey = "islandStrokeColor"
 
     /// Без ключа остаётся нынешний тёмный вид.
     static var mode: IslandLookMode {
@@ -136,23 +138,39 @@ enum IslandLook {
 
     /// Выбранное. Без своего цвета совпадает с чернилами темы.
     static var accent: NSColor {
-        get {
-            guard let data = UserDefaults.standard.data(forKey: accentKey),
-                  let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data) else {
-                return UtkaChrome.ink
-            }
-            return color
+        get { storedColor(accentKey) ?? UtkaChrome.ink }
+        set { store(newValue, key: accentKey) }
+    }
+
+    private static func storedColor(_ key: String) -> NSColor? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data)
+    }
+
+    private static func store(_ color: NSColor, key: String) {
+        let rgb = color.usingColorSpace(.sRGB) ?? color
+        if let data = try? NSKeyedArchiver.archivedData(withRootObject: rgb, requiringSecureCoding: true) {
+            UserDefaults.standard.set(data, forKey: key)
         }
+        poke()
+    }
+
+    static var hasAccent: Bool { UserDefaults.standard.data(forKey: accentKey) != nil }
+
+    /// Обводка капли. Без ключа выключена.
+    static var strokeOn: Bool {
+        get { UserDefaults.standard.bool(forKey: strokeKey) }
         set {
-            let rgb = newValue.usingColorSpace(.sRGB) ?? newValue
-            if let data = try? NSKeyedArchiver.archivedData(withRootObject: rgb, requiringSecureCoding: true) {
-                UserDefaults.standard.set(data, forKey: accentKey)
-            }
+            UserDefaults.standard.set(newValue, forKey: strokeKey)
             poke()
         }
     }
 
-    static var hasAccent: Bool { UserDefaults.standard.data(forKey: accentKey) != nil }
+    /// Цвет обводки. Без своего цвета совпадает с чернилами темы.
+    static var strokeColor: NSColor {
+        get { storedColor(strokeColorKey) ?? UtkaChrome.ink }
+        set { store(newValue, key: strokeColorKey) }
+    }
 
     static var dark: Bool {
         switch mode {
@@ -614,9 +632,27 @@ final class DuckMarkView: NSView {
     var image: NSImage? { didSet { needsDisplay = true } }
     var onClick: (() -> Void)?
 
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        NotificationCenter.default.addObserver(self, selector: #selector(lookChanged), name: IslandLook.changed, object: nil)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
     override func draw(_ dirtyRect: NSRect) {
+        guard let image else { return }
         NSGraphicsContext.current?.imageInterpolation = .high
-        image?.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
+        image.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
+        guard !IslandLook.dark else { return }
+        NSGraphicsContext.current?.saveGraphicsState()
+        NSColor.black.setFill()
+        bounds.fill(using: .sourceAtop)
+        NSGraphicsContext.current?.restoreGraphicsState()
+    }
+
+    /// На светлой капле белая утка становится чёрной.
+    @objc private func lookChanged() {
+        needsDisplay = true
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
