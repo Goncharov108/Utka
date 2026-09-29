@@ -2,23 +2,23 @@ import AppKit
 
 /// Окно настроек. Открывается кликом по утке на островке.
 final class SettingsPanel: NSObject {
-    var onGesture: ((Bool) -> Void)?
-
     private let window: NSWindow
     private let body = SettingsBody()
     private let titleLabel = UtkaChrome.label("Настройки", size: 18, weight: .semibold)
     private let hints: [NSTextField]
-    private let gestureTitle = UtkaChrome.label("Жест", size: 13, weight: .semibold)
-    private let gestureSwitch = NSSwitch()
-    private let gestureLabel = UtkaChrome.label("Включён", size: 13)
     private let languageTitle = UtkaChrome.label("Перевод", size: 13, weight: .semibold)
-    private let languageLine = UtkaChrome.label("Проверь в настройках языка, скачаны ли английский и русский.", size: 12, color: UtkaChrome.dim)
+    private let englishName = UtkaChrome.label("Английский", size: 13)
+    private let englishState = UtkaChrome.label("", size: 13, color: UtkaChrome.dim)
+    private let russianName = UtkaChrome.label("Русский", size: 13)
+    private let russianState = UtkaChrome.label("", size: 13, color: UtkaChrome.dim)
     private let languageButton = NSButton()
+    private let languageNote = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
+    private let languageSettings = NSButton()
     private let updateTitle = UtkaChrome.label("Обновления", size: 13, weight: .semibold)
     private let updateButton = NSButton()
     private let updateLine = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
     private var checking = false
-    private var applyingGesture = false
+    private var downloading = false
 
     override init() {
         hints = [
@@ -29,7 +29,7 @@ final class SettingsPanel: NSObject {
             "Escape прячет островок."
         ].map { UtkaChrome.label($0, size: 12, color: UtkaChrome.dim) }
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 470),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 460),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -47,28 +47,31 @@ final class SettingsPanel: NSObject {
         body.arrange = { [weak self] in self?.layoutContents() }
         window.contentView = body
         for hint in hints { body.addSubview(hint) }
-        languageLine.maximumNumberOfLines = 2
-        languageLine.lineBreakMode = .byWordWrapping
-        languageLine.cell?.wraps = true
-        gestureSwitch.target = self
-        gestureSwitch.action = #selector(gestureMoved)
-        mount(languageButton, title: "Открыть настройки языка", action: #selector(openLanguages))
+        englishState.alignment = .right
+        russianState.alignment = .right
+        languageNote.maximumNumberOfLines = 2
+        languageNote.lineBreakMode = .byWordWrapping
+        languageNote.cell?.wraps = true
+        mount(languageButton, title: "Скачать английский и русский", action: #selector(downloadLanguages))
+        mount(languageSettings, title: "Открыть настройки языка", action: #selector(openLanguages))
         mount(updateButton, title: "Проверить обновления", action: #selector(checkUpdates))
         body.addSubview(titleLabel)
-        body.addSubview(gestureTitle)
-        body.addSubview(gestureSwitch)
-        body.addSubview(gestureLabel)
         body.addSubview(languageTitle)
-        body.addSubview(languageLine)
+        body.addSubview(englishName)
+        body.addSubview(englishState)
+        body.addSubview(russianName)
+        body.addSubview(russianState)
         body.addSubview(languageButton)
+        body.addSubview(languageNote)
+        body.addSubview(languageSettings)
+        refreshLanguages()
         body.addSubview(updateTitle)
         body.addSubview(updateButton)
         body.addSubview(updateLine)
     }
 
-    /// Ставит окно по центру экрана островка и показывает текущий жест.
-    func show(on screen: NSScreen?, gestureEnabled: Bool) {
-        setGesture(gestureEnabled)
+    /// Ставит окно по центру экрана островка.
+    func show(on screen: NSScreen?) {
         let size = window.frame.size
         let area = (screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: size.width, height: size.height)
         window.setFrame(NSRect(
@@ -80,20 +83,50 @@ final class SettingsPanel: NSObject {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(body)
+        refreshLanguages()
     }
 
-    /// Синхронизирует тумблер с меню, не запуская повторное включение.
-    func setGesture(_ on: Bool) {
-        let state: NSControl.StateValue = on ? .on : .off
-        guard gestureSwitch.state != state else { return }
-        applyingGesture = true
-        gestureSwitch.state = state
-        applyingGesture = false
+    /// Подписи «скачан» только по файлам. Кнопка скачивания — если какого-то пакета нет.
+    private func refreshLanguages() {
+        let packs = LanguagePacks.items()
+        paint(englishState, ready: packs.contains { $0.title == "Английский" && $0.ready })
+        paint(russianState, ready: packs.contains { $0.title == "Русский" && $0.ready })
+        let missing = packs.contains { !$0.ready }
+        languageButton.isHidden = !missing
+        languageButton.isEnabled = !downloading
+        if !missing {
+            languageNote.stringValue = ""
+        }
+        languageSettings.isHidden = languageNote.stringValue.isEmpty || languageNote.stringValue == "Качаю…"
+        body.needsLayout = true
     }
 
-    @objc private func gestureMoved() {
-        guard !applyingGesture else { return }
-        onGesture?(gestureSwitch.state == .on)
+    /// «Скачан», только когда пакет уже лежит на диске.
+    private func paint(_ label: NSTextField, ready: Bool) {
+        label.stringValue = ready ? "скачан" : "нет"
+        label.textColor = ready ? UtkaChrome.ink : UtkaChrome.dim
+    }
+
+    @objc private func downloadLanguages() {
+        guard !downloading else { return }
+        downloading = true
+        languageNote.stringValue = "Качаю…"
+        languageSettings.isHidden = true
+        refreshLanguages()
+        LanguagePacks.download { [weak self] error in
+            guard let self else { return }
+            self.downloading = false
+            self.refreshLanguages()
+            let ready = LanguagePacks.items().allSatisfy(\.ready)
+            if ready {
+                self.languageNote.stringValue = ""
+                self.languageSettings.isHidden = true
+                return
+            }
+            self.languageNote.stringValue = error ?? "На диске пакета нет"
+            self.languageSettings.isHidden = false
+            self.body.needsLayout = true
+        }
     }
 
     @objc private func openLanguages() {
@@ -118,6 +151,14 @@ final class SettingsPanel: NSObject {
         }.resume()
     }
 
+    /// Строка языка: имя слева, «скачан» или «нет» справа.
+    private func placePack(_ name: NSTextField, _ state: NSTextField, y: CGFloat, text: NSRect) -> CGFloat {
+        let stateWidth: CGFloat = 88
+        name.frame = NSRect(x: text.minX, y: y, width: text.width - stateWidth, height: 18)
+        state.frame = NSRect(x: text.maxX - stateWidth, y: y, width: stateWidth, height: 18)
+        return y + 22
+    }
+
     /// Кнопка с тем же гротеском, что и остальное окно.
     private func mount(_ button: NSButton, title: String, action: Selector) {
         button.title = title
@@ -139,22 +180,39 @@ final class SettingsPanel: NSObject {
             y += 22
         }
         y += 10
-        gestureTitle.frame = NSRect(x: text.minX, y: y, width: text.width, height: 16)
-        y += 24
-        gestureSwitch.frame = NSRect(x: text.minX, y: y, width: 38, height: 22)
-        gestureLabel.frame = NSRect(x: text.minX + 48, y: y, width: text.width - 48, height: 22)
-        y += 36
         languageTitle.frame = NSRect(x: text.minX, y: y, width: text.width, height: 16)
-        y += 22
-        languageLine.frame = NSRect(x: text.minX, y: y, width: text.width, height: 32)
-        y += 38
-        languageButton.frame = NSRect(x: text.minX, y: y, width: languageButton.frame.width + 8, height: 28)
-        y += 40
+        y += 24
+        y = placePack(englishName, englishState, y: y, text: text)
+        y = placePack(russianName, russianState, y: y, text: text)
+        if !languageButton.isHidden {
+            y += 6
+            languageButton.frame = NSRect(x: text.minX, y: y, width: languageButton.frame.width + 8, height: 28)
+            y += 34
+        }
+        if !languageNote.stringValue.isEmpty {
+            languageNote.frame = NSRect(x: text.minX, y: y, width: text.width, height: 32)
+            y += 36
+        }
+        if !languageSettings.isHidden {
+            languageSettings.frame = NSRect(x: text.minX, y: y, width: languageSettings.frame.width + 8, height: 28)
+            y += 36
+        }
+        y += 8
         updateTitle.frame = NSRect(x: text.minX, y: y, width: text.width, height: 16)
         y += 24
         updateButton.frame = NSRect(x: text.minX, y: y, width: updateButton.frame.width + 8, height: 28)
         y += 34
         updateLine.frame = NSRect(x: text.minX, y: y, width: text.width, height: 16)
+        fitWindow(contentBottom: y + 16)
+    }
+
+    /// Держит верх окна на месте и убирает пустоту под последней строкой.
+    private func fitWindow(contentBottom: CGFloat) {
+        let height = contentBottom + 28
+        let frame = window.frame
+        guard abs(frame.height - height) > 1 else { return }
+        let top = frame.maxY
+        window.setFrame(NSRect(x: frame.minX, y: top - height, width: frame.width, height: height), display: true)
     }
 
     private func showRelease(_ data: Data, status: Int) {
