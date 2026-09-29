@@ -2,6 +2,12 @@
 # Собирает Utka.app без Xcode: универсальный бинарник и иконка утки.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+bash "$ROOT/scripts/bump-version.sh"
+APP_VERSION="$(head -n 1 "$ROOT/VERSION" | tr -d '[:space:]')"
+if ! [[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "В файле VERSION нужны три числа в первой строке, сейчас: ${APP_VERSION:-пусто}" >&2
+  exit 1
+fi
 
 if ! command -v clang >/dev/null 2>&1 || ! command -v swiftc >/dev/null 2>&1; then
   echo "Установите Command Line Tools: xcode-select --install" >&2
@@ -44,6 +50,22 @@ write_icon() {
   rm -rf "$(dirname "$set")"
 }
 APP="$ROOT/Utka.app"
+# Предыдущая утка только на этом Маке. В репозиторий не кладётся.
+# Сначала полная копия во временную папку: пустой Utka.app предыдущую не затирает.
+PREVIOUS="$HOME/Library/Application Support/Utka/PreviousUtka.app"
+if [ -x "$APP/Contents/MacOS/Utka" ]; then
+  support="$HOME/Library/Application Support/Utka"
+  stage="$support/PreviousUtka.staging.app"
+  mkdir -p "$support"
+  rm -rf "$stage"
+  ditto "$APP" "$stage"
+  if [ -x "$stage/Contents/MacOS/Utka" ]; then
+    rm -rf "$PREVIOUS"
+    mv "$stage" "$PREVIOUS"
+  else
+    rm -rf "$stage"
+  fi
+fi
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/Resources/utka-mark.png" "$APP/Contents/Resources/utka-mark.png"
@@ -127,21 +149,16 @@ cat > "$APP/Contents/Info.plist" << 'EOF'
 </dict>
 </plist>
 EOF
-# Номер сборки — коммит, из которого собрано приложение. По нему настройки сверяют общий main.
-UTKA_COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
-UTKA_SUBJECT="$(git -C "$ROOT" log -1 --format=%s 2>/dev/null || true)"
-if [ -n "$UTKA_COMMIT" ]; then
-  UTKA_COMMIT="$UTKA_COMMIT" UTKA_SUBJECT="$UTKA_SUBJECT" APP_PLIST="$APP/Contents/Info.plist" python3 -c '
+# Номер приложения — первая строка VERSION. Описание и версия плагина сюда не входят.
+APP_VERSION="$APP_VERSION" APP_PLIST="$APP/Contents/Info.plist" python3 -c '
 import os, plistlib
 path = os.environ["APP_PLIST"]
 with open(path, "rb") as handle:
     data = plistlib.load(handle)
-data["UtkaBuiltCommit"] = os.environ.get("UTKA_COMMIT", "")
-data["UtkaBuiltSubject"] = os.environ.get("UTKA_SUBJECT", "")
+data["CFBundleShortVersionString"] = os.environ["APP_VERSION"]
 with open(path, "wb") as handle:
     plistlib.dump(data, handle, fmt=plistlib.FMT_XML)
 '
-fi
 # Одна и та же подпись на каждую сборку, иначе macOS забывает разрешение и режет окна.
 if ! security find-certificate -c "Utka Local" >/dev/null 2>&1; then
   CERT_DIR="$(mktemp -d)"

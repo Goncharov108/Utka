@@ -1,13 +1,13 @@
 import AppKit
 
-/// Сверка сборки с общим main utka-apps и установка: забрать коммиты, собрать, открыть заново.
+/// Сверка номера с общим main utka-apps, установка и возврат предыдущей утки.
 enum AppUpdate {
     struct Report {
         var text: String
         var canInstall: Bool
     }
 
-    /// Что в общем main есть такого, чего нет в этой сборке.
+    /// Номер с общего main и текст, что лежит в этом обновлении.
     static func look() -> Report {
         guard let repo = repoRoot() else {
             return Report(text: "Рядом с приложением нет папки с кодом", canInstall: false)
@@ -18,24 +18,25 @@ enum AppUpdate {
         guard fetchMain(repo, remote) else {
             return Report(text: "Не удалось свериться с общим main", canInstall: false)
         }
-        let tip = git(repo, ["log", "-1", "--format=%s", "\(remote)/main"]).out
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !tip.isEmpty else {
-            return Report(text: "В общем main пусто", canInstall: false)
+        let shown = git(repo, ["show", "\(remote)/main:VERSION"])
+        guard shown.code == 0, let remoteNote = parseVersionFile(shown.out) else {
+            return Report(text: "На общем main ещё нет файла версии", canInstall: false)
         }
-        let built = Bundle.main.object(forInfoDictionaryKey: "UtkaBuiltCommit") as? String ?? ""
-        guard !built.isEmpty else {
-            return Report(text: "В общем main:\n\(tip)", canInstall: true)
+        let current = installedVersion()
+        let currentLabel = current.map(withVee) ?? "номер сборки неизвестен"
+        if current == remoteNote.version {
+            return Report(
+                text: "Сейчас \(currentLabel)\nВ общем main \(withVee(remoteNote.version))\nСтавить нечего",
+                canInstall: false
+            )
         }
-        let log = git(repo, ["log", "--format=%s", "\(built)..\(remote)/main"])
-        guard log.code == 0 else {
-            return Report(text: "В общем main:\n\(tip)", canInstall: true)
+        var lines = ["Сейчас \(currentLabel)", "Новая \(withVee(remoteNote.version))"]
+        if remoteNote.note.isEmpty {
+            lines.append("Описания этого обновления на общем main нет")
+        } else {
+            lines.append(remoteNote.note)
         }
-        let subjects = log.out.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
-        guard !subjects.isEmpty else {
-            return Report(text: "Новее общего main ничего нет", canInstall: false)
-        }
-        return Report(text: summary(subjects), canInstall: true)
+        return Report(text: lines.joined(separator: "\n"), canInstall: true)
     }
 
     /// Кладёт общий main в текущую ветку. nil — можно собирать. Текст — почему нельзя.
@@ -70,23 +71,24 @@ enum AppUpdate {
             log: log,
             pid: ProcessInfo.processInfo.processIdentifier
         )
-        do {
-            try Data(script.utf8).write(to: scriptURL, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
-        } catch {
-            return false
+        guard writeExecutable(script, to: scriptURL) else { return false }
+        return launchDetached(scriptURL, in: repo)
+    }
+
+    /// Ставит предыдущую утку на место текущей. nil — скрипт запущен. Текст — почему нельзя.
+    static func startRestore() -> String? {
+        let previous = previousBundle()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: previous.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return "Возвращать нечего"
         }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-c", "nohup /bin/bash \(bashQuote(scriptURL.path)) </dev/null >/dev/null 2>&1 &"]
-        process.currentDirectoryURL = repo
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return false
+        let current = Bundle.main.bundleURL
+        let scriptURL = UtkaPaths.support.appendingPathComponent("restore.sh")
+        let script = restoreScript(current: current, previous: previous, pid: ProcessInfo.processInfo.processIdentifier)
+        guard writeExecutable(script, to: scriptURL) else {
+            return "Не удалось начать возврат"
         }
-        return process.terminationStatus == 0
+        return launchDetached(scriptURL, in: current.deletingLastPathComponent()) ? nil : "Не удалось начать возврат"
     }
 
     /// Подтягивает main в refs/remotes/…/main, а не только во временный FETCH_HEAD.
@@ -94,16 +96,39 @@ enum AppUpdate {
         git(repo, ["fetch", remote, "+refs/heads/main:refs/remotes/\(remote)/main"], capture: false, timeout: 45).code == 0
     }
 
-    /// Первые правки списком, остальные — числом.
-    private static func summary(_ subjects: [String]) -> String {
-        let shown = subjects.prefix(4)
-        var lines = ["Готово:"]
-        lines.append(contentsOf: shown.map { "— \($0)" })
-        let rest = subjects.count - shown.count
-        if rest > 0 {
-            lines.append("и ещё \(rest)")
+    /// Первая строка файла версии — три числа, дальше описание человеческим языком.
+    private static func parseVersionFile(_ text: String) -> (version: String, note: String)? {
+        let lines = text.components(separatedBy: "\n")
+        guard let first = lines.first.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }),
+              isThreePart(first) else { return nil }
+        let note = lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return (first, note)
+    }
+
+    /// Номер уже собранного приложения, не из рабочей копии файла версии.
+    private static func installedVersion() -> String? {
+        guard let raw = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else {
+            return nil
         }
-        return lines.joined(separator: "\n")
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return isThreePart(text) ? text : nil
+    }
+
+    /// Три числа через точку, без буквы v.
+    private static func isThreePart(_ text: String) -> Bool {
+        let parts = text.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return false }
+        return parts.allSatisfy { part in !part.isEmpty && part.allSatisfy { $0.isASCII && $0.isNumber } }
+    }
+
+    /// Номер в настройках: v1.0.0.
+    private static func withVee(_ version: String) -> String {
+        "v\(version)"
+    }
+
+    /// Копия утки, которую сборка оставляет перед заменой.
+    private static func previousBundle() -> URL {
+        UtkaPaths.support.appendingPathComponent("PreviousUtka.app", isDirectory: true)
     }
 
     /// Папка репозитория, если приложение лежит в ней.
@@ -141,22 +166,13 @@ enum AppUpdate {
         export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
         exec >\(bashQuote(log.path)) 2>&1
         cd \(bashQuote(repo.path)) || exit 1
-        pid=\(pid)
-        if [ "$pid" -gt 0 ]; then
-          kill -TERM "$pid" 2>/dev/null || true
-          for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-            kill -0 "$pid" 2>/dev/null || break
-            sleep 0.25
-          done
-          kill -KILL "$pid" 2>/dev/null || true
-          sleep 0.2
-        fi
+        \(waitSnippet(pid: pid))
         driver=\(bashQuote(driver))
         before=""
         if [ -f "$driver" ]; then
           before=$(shasum -a 256 "$driver" | awk '{print $1}')
         fi
-        if ! bash scripts/build-app.sh; then
+        if ! UTKA_INSTALL=1 bash scripts/build-app.sh; then
           osascript -e 'display alert "Утка не собралась" message "Подробности в ~/Library/Application Support/Utka/update.log"' || true
           exit 1
         fi
@@ -169,6 +185,71 @@ enum AppUpdate {
         fi
         open \(bashQuote(repo.appendingPathComponent("Utka.app").path))
         """
+    }
+
+    /// Меняет текущую утку и копию местами. Git не вызывает.
+    private static func restoreScript(current: URL, previous: URL, pid: Int32) -> String {
+        let hold = previous.deletingLastPathComponent().appendingPathComponent("Utka.hold.app")
+        return """
+        #!/bin/bash
+        set -u
+        export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+        \(waitSnippet(pid: pid))
+        current=\(bashQuote(current.path))
+        previous=\(bashQuote(previous.path))
+        hold=\(bashQuote(hold.path))
+        say_fail() {
+          osascript -e 'display alert "Не удалось вернуть предыдущую утку"' || true
+          exit 1
+        }
+        rm -rf "$hold"
+        mv "$current" "$hold" || say_fail
+        mv "$previous" "$current" || { mv "$hold" "$current" || true; say_fail; }
+        mv "$hold" "$previous" || say_fail
+        open "$current"
+        """
+    }
+
+    /// Дожидается выхода утки, чтобы заменить её папку.
+    private static func waitSnippet(pid: Int32) -> String {
+        """
+        pid=\(pid)
+        if [ "$pid" -gt 0 ]; then
+          kill -TERM "$pid" 2>/dev/null || true
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.25
+          done
+          kill -KILL "$pid" 2>/dev/null || true
+          sleep 0.2
+        fi
+        """
+    }
+
+    /// Пишет скрипт, который переживёт выход утки.
+    private static func writeExecutable(_ script: String, to url: URL) -> Bool {
+        do {
+            try Data(script.utf8).write(to: url, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Запускает скрипт в фоне и не ждёт, пока утка закроется.
+    private static func launchDetached(_ scriptURL: URL, in directory: URL) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", "nohup /bin/bash \(bashQuote(scriptURL.path)) </dev/null >/dev/null 2>&1 &"]
+        process.currentDirectoryURL = directory
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return false
+        }
+        return process.terminationStatus == 0
     }
 
     /// Кавычки для пути в bash.
