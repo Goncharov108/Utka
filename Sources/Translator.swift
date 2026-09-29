@@ -5,6 +5,14 @@ struct TranslateFailure: Error {
 }
 
 /// Офлайн-перевод системной моделью en↔ru. Пакет лежит в ~/Library/Translation.
+///
+/// Класс `_LTTextSession` — приватный и не документированный: на части систем
+/// (другая версия macOS, региональные ограничения на офлайн-модель) он может
+/// не отвечать на ожидаемые методы. Вызов несуществующего метода через
+/// objc_msgSend не бросает обычную Swift-ошибку — Objective-C кидает
+/// исключение, которое ничем не поймать, и всё приложение падает разом.
+/// Поэтому каждый метод проверяется через `responds(to:)`, прежде чем
+/// вызывать его напрямую.
 enum SystemTextTranslate {
     static func translate(_ text: String, toEnglish: Bool) -> Result<String, TranslateFailure> {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -21,23 +29,34 @@ enum SystemTextTranslate {
         let maker = unsafeBitCast(raw, to: Maker.self)
         let flag = unsafeBitCast(raw, to: Flag.self)
         let run = unsafeBitCast(raw, to: Run.self)
-        guard let cls = objc_getClass("_LTTextSession") as AnyObject? else {
+        guard let anyClass = objc_getClass("_LTTextSession"),
+              let cls = unsafeBitCast(anyClass, to: AnyClass.self) as? NSObject.Type else {
+            return .failure(TranslateFailure(message: "language"))
+        }
+        let initSelector = Selector(("initWithSourceLocale:targetLocale:"))
+        guard cls.instancesRespond(to: initSelector) else {
             return .failure(TranslateFailure(message: "language"))
         }
         let source = toEnglish ? "ru_RU" : "en_US"
         let target = toEnglish ? "en_US" : "ru_RU"
         guard let session = maker(
             getter(cls, sel_registerName("alloc"))!,
-            sel_registerName("initWithSourceLocale:targetLocale:"),
+            initSelector,
             NSLocale(localeIdentifier: source),
             NSLocale(localeIdentifier: target)
-        ) else {
+        ), let sessionObject = session as? NSObject else {
             return .failure(TranslateFailure(message: "language"))
         }
-        flag(session, sel_registerName("setAllowOnlineTranslation:"), 0)
+        let flagSelector = Selector(("setAllowOnlineTranslation:"))
+        let runSelector = Selector(("translateString:completionHandler:"))
+        guard sessionObject.responds(to: flagSelector), sessionObject.responds(to: runSelector) else {
+            return .failure(TranslateFailure(message: "language"))
+        }
+        flag(session, flagSelector, 0)
         let box = TranslateBox()
         let done: @convention(block) (AnyObject?, AnyObject?) -> Void = { result, error in
-            if let result = result {
+            if let result = result,
+               (result as? NSObject)?.responds(to: Selector(("targetText"))) == true {
                 box.text = getter(result, sel_registerName("targetText")) as? String
             }
             if box.text == nil {
@@ -45,7 +64,7 @@ enum SystemTextTranslate {
             }
             box.gate.signal()
         }
-        run(session, sel_registerName("translateString:completionHandler:"), trimmed as NSString, unsafeBitCast(done, to: AnyObject.self))
+        run(session, runSelector, trimmed as NSString, unsafeBitCast(done, to: AnyObject.self))
         if box.gate.wait(timeout: .now() + 20) == .timedOut {
             return .failure(TranslateFailure(message: "timeout"))
         }
@@ -85,11 +104,24 @@ enum LanguagePacks {
     }
 
     /// Качает модель en↔ru. nil значит вызов кончился без ошибки; подпись всё равно сверяется по диску.
+    ///
+    /// `_LTLocalePair` и `_LTTranslator` — приватные классы; каждый метод
+    /// проверяется через `responds(to:)`, иначе несуществующий метод роняет
+    /// всё приложение необработанным исключением Objective-C (см. тот же
+    /// приём в SystemTextTranslate).
     static func download(completion: @escaping (String?) -> Void) {
         guard dlopen("/System/Library/Frameworks/Translation.framework/Versions/A/Translation", RTLD_NOW) != nil,
               let raw = dlsym(dlopen(nil, RTLD_NOW), "objc_msgSend"),
-              let cls = objc_getClass("_LTLocalePair") as AnyObject?,
-              let translator = objc_getClass("_LTTranslator") as AnyObject? else {
+              let pairAnyClass = objc_getClass("_LTLocalePair"),
+              let cls = unsafeBitCast(pairAnyClass, to: AnyClass.self) as? NSObject.Type,
+              let translatorAnyClass = objc_getClass("_LTTranslator"),
+              let translator = unsafeBitCast(translatorAnyClass, to: AnyClass.self) as? NSObject.Type else {
+            completion("Нет системного перевода")
+            return
+        }
+        let initSelector = Selector(("initWithSourceLocale:targetLocale:"))
+        let fetchSelector = Selector(("_downloadAssetForLanguagePair:userInitiated:completion:"))
+        guard cls.instancesRespond(to: initSelector), translator.instancesRespond(to: fetchSelector) else {
             completion("Нет системного перевода")
             return
         }
@@ -101,7 +133,7 @@ enum LanguagePacks {
         let fetch = unsafeBitCast(raw, to: Fetch.self)
         guard let pair = maker(
             getter(cls, sel_registerName("alloc"))!,
-            sel_registerName("initWithSourceLocale:targetLocale:"),
+            initSelector,
             NSLocale(localeIdentifier: "en_US"),
             NSLocale(localeIdentifier: "ru_RU")
         ) else {
