@@ -17,7 +17,9 @@ final class SettingsPanel: NSObject {
     private let updateTitle = UtkaChrome.label("Обновления", size: 13, weight: .semibold)
     private let updateButton = NSButton()
     private let updateLine = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
+    private let installButton = NSButton()
     private var checking = false
+    private var installing = false
     private var downloading = false
 
     override init() {
@@ -54,7 +56,12 @@ final class SettingsPanel: NSObject {
         languageNote.cell?.wraps = true
         mount(languageButton, title: "Скачать английский и русский", action: #selector(downloadLanguages))
         mount(languageSettings, title: "Открыть настройки языка", action: #selector(openLanguages))
+        updateLine.maximumNumberOfLines = 8
+        updateLine.lineBreakMode = .byWordWrapping
+        updateLine.cell?.wraps = true
         mount(updateButton, title: "Проверить обновления", action: #selector(checkUpdates))
+        mount(installButton, title: "Установить", action: #selector(installUpdate))
+        installButton.isHidden = true
         body.addSubview(titleLabel)
         body.addSubview(languageTitle)
         body.addSubview(englishName)
@@ -68,6 +75,7 @@ final class SettingsPanel: NSObject {
         body.addSubview(updateTitle)
         body.addSubview(updateButton)
         body.addSubview(updateLine)
+        body.addSubview(installButton)
     }
 
     /// Ставит окно по центру экрана островка.
@@ -133,22 +141,59 @@ final class SettingsPanel: NSObject {
         ShortcutTranslate.openLanguageSettings()
     }
 
-    /// Сверяет номер сборки с последним выпуском. Скачивать нечего, пока выпусков нет.
+    /// Сверяет сборку с общим main и показывает, что именно готово.
     @objc private func checkUpdates() {
-        guard !checking else { return }
+        guard !checking, !installing else { return }
         checking = true
-        updateLine.stringValue = "Проверяю…"
-        var request = URLRequest(url: URL(string: "https://api.github.com/repos/utka-apps/utka/releases/latest")!)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = 15
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        installButton.isHidden = true
+        updateButton.isEnabled = false
+        updateLine.stringValue = "Проверяю общий main…"
+        body.needsLayout = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let report = AppUpdate.look()
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.checking = false
-                self.showRelease(data ?? Data(), status: code)
+                self.updateButton.isEnabled = true
+                self.installButton.isHidden = !report.canInstall
+                self.updateLine.stringValue = report.text
+                self.body.needsLayout = true
             }
-        }.resume()
+        }
+    }
+
+    /// Забирает общий main, собирает утку и открывает её заново.
+    @objc private func installUpdate() {
+        guard !installing, !installButton.isHidden else { return }
+        installing = true
+        installButton.isEnabled = false
+        updateButton.isEnabled = false
+        updateLine.stringValue = "Забираю общий main…"
+        body.needsLayout = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let error = AppUpdate.prepareInstall()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let error {
+                    self.installing = false
+                    self.installButton.isEnabled = true
+                    self.updateButton.isEnabled = true
+                    self.updateLine.stringValue = error
+                    self.body.needsLayout = true
+                    return
+                }
+                guard AppUpdate.startRebuild() else {
+                    self.installing = false
+                    self.installButton.isEnabled = true
+                    self.updateButton.isEnabled = true
+                    self.updateLine.stringValue = "Не удалось начать сборку"
+                    self.body.needsLayout = true
+                    return
+                }
+                self.updateLine.stringValue = "Собираю и открою заново"
+                NSApp.terminate(nil)
+            }
+        }
     }
 
     /// Строка языка: имя слева, «скачан» или «нет» справа.
@@ -202,8 +247,17 @@ final class SettingsPanel: NSObject {
         y += 24
         updateButton.frame = NSRect(x: text.minX, y: y, width: updateButton.frame.width + 8, height: 28)
         y += 34
-        updateLine.frame = NSRect(x: text.minX, y: y, width: text.width, height: 16)
-        fitWindow(contentBottom: y + 16)
+        if !updateLine.stringValue.isEmpty {
+            let lines = updateLine.stringValue.split(separator: "\n", omittingEmptySubsequences: false).count
+            let height = CGFloat(min(max(lines, 1), 8)) * 16
+            updateLine.frame = NSRect(x: text.minX, y: y, width: text.width, height: height)
+            y += height + 8
+        }
+        if !installButton.isHidden {
+            installButton.frame = NSRect(x: text.minX, y: y, width: installButton.frame.width + 8, height: 28)
+            y += 36
+        }
+        fitWindow(contentBottom: y + 8)
     }
 
     /// Держит верх окна на месте и убирает пустоту под последней строкой.
@@ -215,25 +269,6 @@ final class SettingsPanel: NSObject {
         window.setFrame(NSRect(x: frame.minX, y: top - height, width: frame.width, height: height), display: true)
     }
 
-    private func showRelease(_ data: Data, status: Int) {
-        if status == 401 || status == 403 || status == 404 {
-            updateLine.stringValue = "Выпусков ещё нет"
-            return
-        }
-        guard status == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tag = json["tag_name"] as? String else {
-            updateLine.stringValue = "Не удалось проверить"
-            return
-        }
-        let remote = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-        let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-        if remote == current {
-            updateLine.stringValue = "Это версия \(current)"
-        } else {
-            updateLine.stringValue = "Есть выпуск \(remote). Сейчас \(current)."
-        }
-    }
 }
 
 /// Фон окна настроек. Escape закрывает.

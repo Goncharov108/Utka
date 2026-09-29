@@ -127,6 +127,21 @@ cat > "$APP/Contents/Info.plist" << 'EOF'
 </dict>
 </plist>
 EOF
+# Номер сборки — коммит, из которого собрано приложение. По нему настройки сверяют общий main.
+UTKA_COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+UTKA_SUBJECT="$(git -C "$ROOT" log -1 --format=%s 2>/dev/null || true)"
+if [ -n "$UTKA_COMMIT" ]; then
+  UTKA_COMMIT="$UTKA_COMMIT" UTKA_SUBJECT="$UTKA_SUBJECT" APP_PLIST="$APP/Contents/Info.plist" python3 -c '
+import os, plistlib
+path = os.environ["APP_PLIST"]
+with open(path, "rb") as handle:
+    data = plistlib.load(handle)
+data["UtkaBuiltCommit"] = os.environ.get("UTKA_COMMIT", "")
+data["UtkaBuiltSubject"] = os.environ.get("UTKA_SUBJECT", "")
+with open(path, "wb") as handle:
+    plistlib.dump(data, handle, fmt=plistlib.FMT_XML)
+'
+fi
 # Одна и та же подпись на каждую сборку, иначе macOS забывает разрешение и режет окна.
 if ! security find-certificate -c "Utka Local" >/dev/null 2>&1; then
   CERT_DIR="$(mktemp -d)"
