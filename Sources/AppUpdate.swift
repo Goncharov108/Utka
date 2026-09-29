@@ -20,7 +20,7 @@ enum AppUpdate {
         }
         let shown = git(repo, ["show", "\(remote)/main:VERSION"])
         guard shown.code == 0, let remoteNote = parseVersionFile(shown.out) else {
-            return Report(text: "На общем main ещё нет файла версии", canInstall: false)
+            return Report(text: "Обновлений нет", canInstall: false)
         }
         let current = installedVersion()
         let currentLabel = current.map(withVee) ?? "номер сборки неизвестен"

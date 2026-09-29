@@ -19,6 +19,9 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let support = UtkaPaths.support
         history = ClipboardHistory(storeURL: support.appendingPathComponent("clipboard.json"))
         shelf = ShelfModel(storeURL: support.appendingPathComponent("shelf.json"))
+        settings.onDeleteShotAfterUse = { [weak shelf] on in
+            shelf?.setDeleteShotAfterUse(on)
+        }
         ShotEditor.shelf = shelf
         presets = PresetsModel(storeURL: support.appendingPathComponent("presets.json"))
 
@@ -31,6 +34,9 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         hover = HoverMonitor()
         panel = IslandPanel(shelf: shelfView, clipboard: clipboardView, presets: presetsView, translator: translator, mark: mark)
+        settings.onIslandBar = { [weak panel] in
+            panel?.setBar()
+        }
         panel.bindActions(target: self, action: #selector(sectionClicked(_:)))
         panel.onSection = { [weak self] section in
             if section == .presets { self?.presetsView.refresh() }
@@ -81,6 +87,9 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let show = NSMenuItem(title: "Показать", action: #selector(showNow), keyEquivalent: "")
         show.target = self
         menu.addItem(show)
+        let settingsItem = NSMenuItem(title: "Настройки", action: #selector(openSettingsFromMenu), keyEquivalent: "")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Выход", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
@@ -116,6 +125,13 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Окно настроек на том экране, где открыт островок.
     private func showSettings() {
         settings.show(on: panel.window.screen)
+    }
+
+    /// То же окно из меню строки, на экране под курсором.
+    @objc private func openSettingsFromMenu() {
+        let point = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? panel.window.screen
+        settings.show(on: screen)
     }
 
     /// Если доступ уже выдали живому процессу — сразу открыть крестик.
@@ -204,6 +220,7 @@ enum SelfCheck {
         checkBookmark()
         checkClipboard()
         checkMark()
+        checkSpot()
         if failed {
             fputs("SELF-CHECK FAILED\n", stderr)
         } else {
@@ -264,6 +281,74 @@ enum SelfCheck {
         }
         if history.items.count != 50 { fail("лимит \(history.items.count)") }
         if history.items.first?.text != "n54" { fail("порядок") }
+    }
+
+    /// Счёт и единицы отвечают сразу, без индекса Spotlight.
+    private static func checkSpot() {
+        let search = IslandSearch()
+        let calc = search.preview("2+2")
+        if calc.first?.title != "4" || calc.first?.detail != "Калькулятор" {
+            fail("калькулятор \(calc.map(\.title))")
+        }
+        let units = search.preview("10 км в м")
+        if !units.contains(where: { $0.detail == "Перевод единиц" && $0.title.hasPrefix("10000") }) {
+            fail("единицы \(units.map(\.title))")
+        }
+        if !search.preview("   ").isEmpty { fail("пустой запрос") }
+        if !search.preview("2").isEmpty { fail("одиночная цифра не счёт") }
+        let ranked = IslandSearch.ordered(
+            [
+                IslandHit(title: "определение", detail: "Словарь", url: nil, copy: nil),
+                IslandHit(title: "сеть", detail: "Сеть", url: nil, copy: nil)
+            ],
+            [
+                IslandHit(title: "Safari", detail: "Программа", url: nil, copy: nil),
+                IslandHit(title: "чек", detail: "Файл", url: nil, copy: nil)
+            ]
+        )
+        if ranked.map(\.title) != ["Safari", "определение", "чек", "сеть"] {
+            fail("порядок \(ranked.map(\.title))")
+        }
+        if IslandSearch.acceptsPath("/Library/Receipts/com.apple.pkg.Safari.bom") { fail("чек в списке") }
+        if !IslandSearch.acceptsPath("/Applications/Safari.app") { fail("программа отсечена") }
+        if IslandSearch.score(name: "ChatGPT", query: "cht") == nil { fail("неточный набор") }
+        if IslandSearch.score(name: "Notes", query: "cht") != nil { fail("ложное совпадение") }
+        let folderRank = IslandSearch.ordered(
+            [IslandHit(title: "сеть", detail: "Сеть", url: nil, copy: nil)],
+            [
+                IslandHit(title: "заметки goncharov", detail: "Файл", url: nil, copy: nil),
+                IslandHit(title: "Goncharov", detail: "Папка", url: URL(fileURLWithPath: "/tmp/Goncharov"), copy: nil)
+            ],
+            query: "goncharov"
+        )
+        if folderRank.map(\.title) != ["Goncharov", "заметки goncharov", "сеть"] {
+            fail("папка \(folderRank.map(\.title))")
+        }
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("utka-spot-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: scratch.appendingPathComponent("Goncharov"), withIntermediateDirectories: true)
+        let walked = IslandSearch.names(in: [scratch], query: "goncharov")
+        if !walked.contains(where: { $0.title == "Goncharov" && $0.detail == "Папка" }) {
+            fail("обход \(walked.map(\.title))")
+        }
+        try? FileManager.default.removeItem(at: scratch)
+        let apps = IslandSearch.readApps()
+        if !apps.contains(where: { $0.path.hasSuffix("/Safari.app") }) {
+            fail("нет Safari среди программ \(apps.count)")
+        }
+        let safari = IslandSearch.appHits(query: "saf", apps: apps, recent: [:])
+        if safari.first?.title != "Safari" { fail("saf \(safari.map(\.title))") }
+        let fuzzy = IslandSearch.appHits(
+            query: "cht",
+            apps: [("ChatGPT", "/Applications/ChatGPT.app")],
+            recent: [:]
+        )
+        if fuzzy.first?.title != "ChatGPT" { fail("cht \(fuzzy.map(\.title))") }
+        var last: [String] = ["x"]
+        search.onHits = { hits in last = hits.map(\.title) }
+        search.lookup("2+2")
+        if last.first != "4" { fail("живой счёт \(last)") }
+        search.lookup("")
+        if !last.isEmpty { fail("очистка не гасит список") }
     }
 
     private static func checkMark() {

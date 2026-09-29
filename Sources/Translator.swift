@@ -54,6 +54,7 @@ final class TranslatorView: NSView {
         addSubview(englishMark)
         addSubview(russianMark)
         addSubview(status)
+        NotificationCenter.default.addObserver(self, selector: #selector(retintTranslate), name: IslandLook.changed, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(englishChanged), name: NSText.didChangeNotification, object: english)
         NotificationCenter.default.addObserver(self, selector: #selector(russianChanged), name: NSText.didChangeNotification, object: russian)
     }
@@ -92,15 +93,24 @@ final class TranslatorView: NSView {
 
     private func style(_ text: NSTextView) {
         text.font = UtkaChrome.font(13)
-        text.textColor = .white
+        text.textColor = UtkaChrome.ink
         text.drawsBackground = true
-        text.backgroundColor = NSColor(white: 0.045, alpha: 1)
-        text.insertionPointColor = .white
+        text.backgroundColor = IslandLook.dark ? NSColor(white: 0.045, alpha: 1) : NSColor(white: 0.96, alpha: 1)
+        text.insertionPointColor = UtkaChrome.ink
         text.isRichText = false
         text.isEditable = true
         text.isAutomaticQuoteSubstitutionEnabled = false
         text.isAutomaticDashSubstitutionEnabled = false
         text.textContainerInset = NSSize(width: 8, height: 18)
+    }
+
+    /// Поля перевода под тот же режим, что островок.
+    @objc private func retintTranslate() {
+        style(english)
+        style(russian)
+        englishMark.textColor = UtkaChrome.dim
+        russianMark.textColor = UtkaChrome.dim
+        status.textColor = UtkaChrome.dim
     }
 
     @objc private func englishChanged() {

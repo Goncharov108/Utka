@@ -39,6 +39,20 @@ final class ShelfModel {
     private(set) var records: [ShelfRecord] = []
     var onChange: (() -> Void)?
 
+    private static let deleteShotAfterUseKey = "deleteShotAfterUse"
+
+    /// Снимать свой снимок с полки после удачного переноса. Без ключа — да.
+    static var deleteShotAfterUse: Bool {
+        guard UserDefaults.standard.object(forKey: deleteShotAfterUseKey) != nil else { return true }
+        return UserDefaults.standard.bool(forKey: deleteShotAfterUseKey)
+    }
+
+    /// Запоминает галочку и пересобирает карточки.
+    func setDeleteShotAfterUse(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: Self.deleteShotAfterUseKey)
+        onChange?()
+    }
+
     private let storeURL: URL
     private var watchers: [(source: DispatchSourceFileSystemObject, fd: Int32)] = []
     private var knownShots: Set<String> = []
@@ -425,6 +439,9 @@ final class ShelfView: NSView {
         addSubview(empty)
         registerForDraggedTypes([.fileURL])
         model.onChange = { [weak self] in self?.rebuild() }
+        NotificationCenter.default.addObserver(forName: IslandLook.changed, object: nil, queue: .main) { [weak self] _ in
+            self?.empty.textColor = UtkaChrome.dim
+        }
         rebuild()
     }
 
@@ -442,7 +459,8 @@ final class ShelfView: NSView {
         cards = model.records.map { record in
             let card = FileCardView()
             card.show(url: model.url(for: record), title: record.name)
-            card.consumeOnDrop = true
+            let ownedShot = UtkaPaths.ownsShot(record.path)
+            card.consumeOnDrop = ownedShot ? ShelfModel.deleteShotAfterUse : true
             card.onDrag = { [weak self] active in self?.onDrag?(active) }
             card.onExportBegan = { [weak self] name in self?.model.protectDesktopName(name) }
             card.onExportCancel = { [weak self] name in self?.model.releaseDesktopName(name) }

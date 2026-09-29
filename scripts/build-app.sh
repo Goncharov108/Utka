@@ -230,16 +230,7 @@ if [ "${#DRIVER_BINS[@]}" -gt 0 ]; then
 </plist>
 EOF
   codesign --force --sign "Utka Local" --identifier dev.goncharov.utka.audio "$DRIVER"
-  HAL="/Library/Audio/Plug-Ins/HAL"
-  mkdir -p "$HAL" 2>/dev/null || true
-  if [ -w "$HAL" ]; then
-    rm -rf "$HAL/UtkaAudio.driver"
-    cp -R "$DRIVER" "$HAL/UtkaAudio.driver"
-    echo "installed $HAL/UtkaAudio.driver"
-  else
-    echo "плагин собран, но $HAL закрыт для записи: нужен один раз пароль администратора" >&2
-    osascript -e "do shell script \"mkdir -p '$HAL' && rm -rf '$HAL/UtkaAudio.driver' && cp -R '$DRIVER' '$HAL/UtkaAudio.driver' && chown -R $(id -un):staff '$HAL'\" with prompt \"Утке нужно поставить выход звука в системную папку.\" with administrator privileges"
-    echo "installed $HAL/UtkaAudio.driver"
-  fi
+  # В /Library/Audio/Plug-Ins/HAL плагин ставит только кнопка в настройках.
+  # Сборка туда не копирует и уже стоящий драйвер не удаляет.
 fi
 echo "built $APP"

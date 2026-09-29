@@ -99,11 +99,118 @@ enum BookmarkStore {
     }
 }
 
+/// Вид островка на этом Маке. В git не пишется.
+enum IslandLookMode: Int {
+    case system
+    case light
+    case dark
+}
+
+enum IslandLook {
+    static let changed = Notification.Name("utka.islandLook")
+    private static let modeKey = "islandLookMode"
+    private static let glassKey = "islandGlass"
+    private static let accentKey = "islandAccent"
+    private static let strokeKey = "islandStroke"
+    private static let strokeColorKey = "islandStrokeColor"
+
+    /// Без ключа остаётся нынешний тёмный вид.
+    static var mode: IslandLookMode {
+        get {
+            guard let raw = UserDefaults.standard.object(forKey: modeKey) as? Int,
+                  let mode = IslandLookMode(rawValue: raw) else { return .dark }
+            return mode
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: modeKey)
+            poke()
+        }
+    }
+
+    /// 0 — плотная заливка как сейчас, 1 — сквозное матовое стекло.
+    static var glass: Double {
+        get { min(1, max(0, UserDefaults.standard.double(forKey: glassKey))) }
+        set {
+            UserDefaults.standard.set(min(1, max(0, newValue)), forKey: glassKey)
+            poke()
+        }
+    }
+
+    /// Выбранное. Без своего цвета совпадает с чернилами темы.
+    static var accent: NSColor {
+        get { storedColor(accentKey) ?? UtkaChrome.ink }
+        set { store(newValue, key: accentKey) }
+    }
+
+    private static func storedColor(_ key: String) -> NSColor? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data)
+    }
+
+    private static func store(_ color: NSColor, key: String) {
+        let rgb = color.usingColorSpace(.sRGB) ?? color
+        if let data = try? NSKeyedArchiver.archivedData(withRootObject: rgb, requiringSecureCoding: true) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+        poke()
+    }
+
+    static var hasAccent: Bool { UserDefaults.standard.data(forKey: accentKey) != nil }
+
+    /// Обводка капли. Без ключа выключена.
+    static var strokeOn: Bool {
+        get { UserDefaults.standard.bool(forKey: strokeKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: strokeKey)
+            poke()
+        }
+    }
+
+    /// Цвет обводки. Без своего цвета совпадает с чернилами темы.
+    static var strokeColor: NSColor {
+        get { storedColor(strokeColorKey) ?? UtkaChrome.ink }
+        set { store(newValue, key: strokeColorKey) }
+    }
+
+    static var dark: Bool {
+        switch mode {
+        case .dark: return true
+        case .light: return false
+        case .system:
+            return NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) != .aqua
+        }
+    }
+
+    static var appearance: NSAppearance? {
+        switch mode {
+        case .system: return nil
+        case .light: return NSAppearance(named: .aqua)
+        case .dark: return NSAppearance(named: .darkAqua)
+        }
+    }
+
+    /// Плотная заливка капли. Прозрачность стекла её разбавляет.
+    static var veil: NSColor {
+        let solid: NSColor = dark ? .black : .white
+        return solid.withAlphaComponent(CGFloat(1 - glass))
+    }
+
+    static var solid: NSColor { dark ? .black : .white }
+
+    static func poke() {
+        NotificationCenter.default.post(name: changed, object: nil)
+    }
+}
+
 /// Общие цвета и шрифт. Только системный гротеск.
 enum UtkaChrome {
-    static let ink = NSColor.white
-    static let dim = NSColor.white.withAlphaComponent(0.55)
-    static let card = NSColor.white.withAlphaComponent(0.08)
+    static var ink: NSColor { IslandLook.dark ? .white : NSColor(calibratedWhite: 0.12, alpha: 1) }
+    static var dim: NSColor {
+        IslandLook.dark ? NSColor.white.withAlphaComponent(0.55) : NSColor.black.withAlphaComponent(0.45)
+    }
+    static var card: NSColor {
+        IslandLook.dark ? NSColor.white.withAlphaComponent(0.08) : NSColor.black.withAlphaComponent(0.06)
+    }
 
     static func font(_ size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
         NSFont.systemFont(ofSize: size, weight: weight)
@@ -208,6 +315,16 @@ final class FileCardView: NSView, NSDraggingSource {
         addSubview(nameLabel)
         addSubview(removeButton)
         addSubview(editButton)
+        NotificationCenter.default.addObserver(self, selector: #selector(retintCard), name: IslandLook.changed, object: nil)
+        retintCard()
+    }
+
+    /// Подтягивает карточку под текущий вид островка.
+    @objc private func retintCard() {
+        layer?.backgroundColor = UtkaChrome.card.cgColor
+        nameLabel.textColor = UtkaChrome.dim
+        removeButton.contentTintColor = UtkaChrome.dim
+        editButton.contentTintColor = UtkaChrome.ink
     }
 
     required init?(coder: NSCoder) { nil }
@@ -285,11 +402,13 @@ final class FileCardView: NSView, NSDraggingSource {
         didDrag = false
         let name = dragName
         dragName = nil
-        guard consumeOnDrop, !operation.isEmpty else {
+        // Удачный перенос без снятия карточки — не отмена: имя на столе остаётся под защитой,
+        // иначе копия возвращается на полку вторым снимком.
+        guard !operation.isEmpty else {
             if let name { onExportCancel?(name) }
             return
         }
-        onConsume?()
+        if consumeOnDrop { onConsume?() }
     }
 
     /// Открывает файл той программой, которую Мак выбрал для этого типа. PDF — как обычный PDF.
@@ -376,9 +495,9 @@ final class TextRowView: NSView {
         textView.isSelectable = true
         textView.drawsBackground = false
         textView.font = UtkaChrome.font(12)
-        textView.textColor = .white
-        textView.insertionPointColor = .white
-        textView.selectedTextAttributes = [.backgroundColor: NSColor.white.withAlphaComponent(0.28)]
+        textView.textColor = UtkaChrome.ink
+        textView.insertionPointColor = UtkaChrome.ink
+        textView.selectedTextAttributes = [.backgroundColor: UtkaChrome.dim]
         textView.textContainerInset = NSSize(width: 2, height: 4)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
@@ -396,7 +515,22 @@ final class TextRowView: NSView {
         addSubview(textScroll)
         addSubview(selectionButton)
         addSubview(collapseButton)
+        NotificationCenter.default.addObserver(self, selector: #selector(retintRow), name: IslandLook.changed, object: nil)
         updateExpanded()
+        retintRow()
+    }
+
+    /// Текст и карточка строки читаются и в светлом виде.
+    @objc private func retintRow() {
+        layer?.backgroundColor = UtkaChrome.card.cgColor
+        titleLabel.textColor = UtkaChrome.ink
+        detailLabel.textColor = UtkaChrome.dim
+        deleteButton.contentTintColor = UtkaChrome.dim
+        copyButton.contentTintColor = UtkaChrome.dim
+        expandButton.contentTintColor = isExpanded ? UtkaChrome.ink : UtkaChrome.dim
+        textView.textColor = UtkaChrome.ink
+        textView.insertionPointColor = UtkaChrome.ink
+        textView.selectedTextAttributes = [.backgroundColor: UtkaChrome.dim]
     }
 
     required init?(coder: NSCoder) { nil }
@@ -428,7 +562,7 @@ final class TextRowView: NSView {
         textScroll.isHidden = !isExpanded
         selectionButton.isHidden = !isExpanded
         collapseButton.isHidden = !isExpanded
-        expandButton.contentTintColor = isExpanded ? .white : UtkaChrome.dim
+        expandButton.contentTintColor = isExpanded ? UtkaChrome.ink : UtkaChrome.dim
         detailLabel.isHidden = isExpanded || detailLabel.stringValue.isEmpty || detailLabel.stringValue == titleLabel.stringValue
         needsLayout = true
     }
@@ -465,7 +599,7 @@ final class TextRowView: NSView {
     }
 
     private func flash() {
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.2).cgColor
+        layer?.backgroundColor = UtkaChrome.ink.withAlphaComponent(0.2).cgColor
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             self?.layer?.backgroundColor = UtkaChrome.card.cgColor
         }
@@ -498,9 +632,27 @@ final class DuckMarkView: NSView {
     var image: NSImage? { didSet { needsDisplay = true } }
     var onClick: (() -> Void)?
 
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        NotificationCenter.default.addObserver(self, selector: #selector(lookChanged), name: IslandLook.changed, object: nil)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
     override func draw(_ dirtyRect: NSRect) {
+        guard let image else { return }
         NSGraphicsContext.current?.imageInterpolation = .high
-        image?.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
+        image.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
+        guard !IslandLook.dark else { return }
+        NSGraphicsContext.current?.saveGraphicsState()
+        NSColor.black.setFill()
+        bounds.fill(using: .sourceAtop)
+        NSGraphicsContext.current?.restoreGraphicsState()
+    }
+
+    /// На светлой капле белая утка становится чёрной.
+    @objc private func lookChanged() {
+        needsDisplay = true
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
