@@ -68,59 +68,190 @@ final class KeyPanel: NSPanel {
 
 /// Чёрная капля: верхние углы выпуклые, плашка шире книзу и держится за кромку.
 final class IslandRoot: NSView {
+    /// Радиус ушей. Бок кончается на той же дуге, иначе контур рвётся.
+    private let earRadius: CGFloat = 18
+    /// Радиус нижнего скругления.
+    private let bottomRadius: CGFloat = 36
+    /// Высота капли от кромки. nil — весь островок.
+    private var revealHeight: CGFloat?
+    /// Чёрная дуга. Вектор, не картинка.
+    private let shape = CAShapeLayer()
+    /// Та же дуга обрезает содержимое.
+    private let clip = CAShapeLayer()
+    /// Нижняя дуга выше кромки окна, прямоугольник её не срезает.
+    private let bottomInset: CGFloat = 2
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func layout() {
         super.layout()
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.black.cgColor
-        let mask = (layer?.mask as? CAShapeLayer) ?? CAShapeLayer()
-        mask.frame = bounds
-        mask.path = islandSilhouette(bounds: bounds, radius: 36)
-        mask.contentsScale = window?.backingScaleFactor ?? 2
-        layer?.mask = mask
+        applyShape()
     }
 
-    /// Уши на всю кромку, плечо вогнуто внутрь, низ скруглён.
-    private func islandSilhouette(bounds: CGRect, radius: CGFloat) -> CGPath {
+    /// Высота видимой капли от верхней кромки. nil — островок целиком.
+    fileprivate func setReveal(_ height: CGFloat?) {
+        revealHeight = height
+        applyShape()
+    }
+
+    /// Чёрная капля в видимой полосе. Фон пустой, без растровой маски.
+    private func applyShape() {
+        wantsLayer = true
+        layer?.backgroundColor = nil
+        let full = bounds
+        let screen = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let visible = revealHeight.map { min(max($0, 0), full.height) } ?? full.height
+        guard full.width > 1, full.height > 1, visible > bottomInset + 1 else {
+            shape.path = nil
+            clip.path = nil
+            return
+        }
+        let drawn = visible - bottomInset
+        // Полоса на видимую высоту. Короче капли — уши сами едут к центру, кромка экран не режет.
+        let band = CGRect(x: 0, y: full.height - visible, width: full.width, height: visible)
+        let shapeBounds = CGRect(x: 0, y: bottomInset, width: band.width, height: drawn)
+        let clipBounds = CGRect(x: 0, y: full.height - visible + bottomInset, width: full.width, height: drawn)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shape.contentsScale = screen
+        shape.fillColor = NSColor.black.cgColor
+        shape.allowsEdgeAntialiasing = true
+        shape.masksToBounds = false
+        shape.frame = band
+        shape.path = islandSilhouette(bounds: shapeBounds, ear: earRadius, bottom: bottomRadius)
+        if shape.superlayer == nil {
+            layer?.insertSublayer(shape, at: 0)
+        }
+        clip.contentsScale = screen
+        clip.fillColor = NSColor.black.cgColor
+        clip.allowsEdgeAntialiasing = true
+        clip.frame = CGRect(origin: .zero, size: full.size)
+        clip.path = islandSilhouette(bounds: clipBounds, ear: earRadius, bottom: bottomRadius)
+        layer?.mask = clip
+        CATransaction.commit()
+    }
+
+    /// Уши на всю кромку, пока капля высокая. У кромки экрана уши съезжают к центру.
+    private func islandSilhouette(bounds: CGRect, ear: CGFloat, bottom: CGFloat) -> CGPath {
+        let span = ear + bottom
+        if bounds.height < span {
+            return suckedSilhouette(bounds: bounds, ear: ear, bottom: bottom)
+        }
+        return restingSilhouette(bounds: bounds, ear: ear, bottom: bottom)
+    }
+
+    /// Полная капля: уши по краям, низ 36.
+    private func restingSilhouette(bounds: CGRect, ear: CGFloat, bottom: CGFloat) -> CGPath {
+        let x0 = bounds.minX
+        let y0 = bounds.minY
         let width = bounds.width
-        let height = bounds.height
+        let top = y0 + bounds.height
         let path = CGMutablePath()
-        path.move(to: CGPoint(x: 0, y: height))
-        path.addLine(to: CGPoint(x: width, y: height))
-        path.addArc(
-            center: CGPoint(x: width, y: height - radius),
-            radius: radius,
-            startAngle: .pi / 2,
-            endAngle: .pi,
+        path.move(to: CGPoint(x: x0, y: top))
+        path.addLine(to: CGPoint(x: x0 + width, y: top))
+        addCorner(
+            path,
+            center: CGPoint(x: x0 + width, y: top - ear),
+            radius: ear,
+            start: .pi / 2,
+            end: .pi,
             clockwise: false
         )
-        path.addLine(to: CGPoint(x: width - radius, y: radius))
-        path.addArc(
-            center: CGPoint(x: width - radius * 2, y: radius),
-            radius: radius,
-            startAngle: 0,
-            endAngle: -.pi / 2,
+        path.addLine(to: CGPoint(x: x0 + width - ear, y: y0 + bottom))
+        addCorner(
+            path,
+            center: CGPoint(x: x0 + width - ear - bottom, y: y0 + bottom),
+            radius: bottom,
+            start: 0,
+            end: -.pi / 2,
             clockwise: true
         )
-        path.addLine(to: CGPoint(x: radius * 2, y: 0))
-        path.addArc(
-            center: CGPoint(x: radius * 2, y: radius),
-            radius: radius,
-            startAngle: -.pi / 2,
-            endAngle: .pi,
+        path.addLine(to: CGPoint(x: x0 + ear + bottom, y: y0))
+        addCorner(
+            path,
+            center: CGPoint(x: x0 + ear + bottom, y: y0 + bottom),
+            radius: bottom,
+            start: -.pi / 2,
+            end: .pi,
             clockwise: true
         )
-        path.addLine(to: CGPoint(x: radius, y: height - radius))
-        path.addArc(
-            center: CGPoint(x: 0, y: height - radius),
-            radius: radius,
-            startAngle: 0,
-            endAngle: .pi / 2,
+        path.addLine(to: CGPoint(x: x0 + ear, y: top - ear))
+        addCorner(
+            path,
+            center: CGPoint(x: x0, y: top - ear),
+            radius: ear,
+            start: 0,
+            end: .pi / 2,
             clockwise: false
         )
         path.closeSubpath()
         return path
+    }
+
+    /// Короткая капля: ухо и низ касаются, уши едут к центру, верх встречается с экраном по горизонтали.
+    private func suckedSilhouette(bounds: CGRect, ear: CGFloat, bottom: CGFloat) -> CGPath {
+        let x0 = bounds.minX
+        let y0 = bounds.minY
+        let width = bounds.width
+        let height = bounds.height
+        let span = ear + bottom
+        // Радиусы как у полной капли: ухо 18, низ 36. Окно дугу не режет.
+        let pull = neckPull(height: height, span: span, width: width)
+        let apart = sqrt(max(0, height * (2 * span - height)))
+        let rightBottom = CGPoint(x: x0 + width - span - pull, y: y0 + bottom)
+        let rightEar = CGPoint(x: rightBottom.x + apart, y: y0 + height - ear)
+        let leftBottom = CGPoint(x: x0 + span + pull, y: y0 + bottom)
+        let leftEar = CGPoint(x: leftBottom.x - apart, y: rightEar.y)
+        let rightTouch = step(from: rightEar, toward: rightBottom, distance: ear)
+        let leftTouch = step(from: leftEar, toward: leftBottom, distance: ear)
+        let top = y0 + height
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: leftEar.x, y: top))
+        path.addLine(to: CGPoint(x: rightEar.x, y: top))
+        addShortArc(path, center: rightEar, radius: ear, from: .pi / 2, to: angle(from: rightEar, to: rightTouch))
+        addShortArc(path, center: rightBottom, radius: bottom, from: angle(from: rightBottom, to: rightTouch), to: -.pi / 2)
+        path.addLine(to: CGPoint(x: leftBottom.x, y: y0))
+        addShortArc(path, center: leftBottom, radius: bottom, from: -.pi / 2, to: angle(from: leftBottom, to: leftTouch))
+        addShortArc(path, center: leftEar, radius: ear, from: angle(from: leftEar, to: leftTouch), to: .pi / 2)
+        path.closeSubpath()
+        return path
+    }
+
+    /// Мёд к центру: 0 у полной капли, плавно до середины к концу.
+    private func neckPull(height: CGFloat, span: CGFloat, width: CGFloat) -> CGFloat {
+        let t = min(1, max(0, (span - height) / span))
+        let eased = t * t * (3 - 2 * t)
+        return eased * max(0, width * 0.5 - span)
+    }
+
+    /// Короткая дуга между углами. Длинный обход вылезает из капли и срезается острым углом.
+    private func addShortArc(_ path: CGMutablePath, center: CGPoint, radius: CGFloat, from start: CGFloat, to end: CGFloat) {
+        var delta = end - start
+        let turn = CGFloat.pi * 2
+        while delta > .pi { delta -= turn }
+        while delta <= -.pi { delta += turn }
+        addCorner(path, center: center, radius: radius, start: start, end: start + delta, clockwise: delta < 0)
+    }
+
+    /// Точка на отрезке в заданном расстоянии от начала.
+    private func step(from start: CGPoint, toward end: CGPoint, distance: CGFloat) -> CGPoint {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let length = hypot(dx, dy)
+        guard length > 0.001 else { return start }
+        let scale = distance / length
+        return CGPoint(x: start.x + dx * scale, y: start.y + dy * scale)
+    }
+
+    /// Угол от центра к точке.
+    private func angle(from center: CGPoint, to point: CGPoint) -> CGFloat {
+        atan2(point.y - center.y, point.x - center.x)
+    }
+
+    /// Дуга угла. Нулевой радиус не рисует дугу, контур идёт прямой.
+    private func addCorner(_ path: CGMutablePath, center: CGPoint, radius: CGFloat, start: CGFloat, end: CGFloat, clockwise: Bool) {
+        guard radius > 0.25 else { return }
+        path.addArc(center: center, radius: radius, startAngle: start, endAngle: end, clockwise: clockwise)
     }
 }
 
@@ -331,6 +462,9 @@ final class SoundStrip: NSView {
 /// Островок у верхнего края выбранного экрана.
 final class IslandPanel {
     let window: KeyPanel
+    /// Обрезает корень по рамке окна. Сам корень не сжимается.
+    private let host = NSView()
+    private let root = IslandRoot()
     /// Верхняя полоса на все разделы. Сюда сядут кнопки, подпись раздела не нужна.
     private let topBar = NSView()
     private let soundStrip = SoundStrip()
@@ -345,6 +479,8 @@ final class IslandPanel {
     private var slideTo: CGRect = .zero
     private var slideStart: Date?
     private var slideOrderOut = false
+    /// Полный размер островка, пока окно растёт вниз от кромки.
+    private var resting = CGRect.zero
     var onSection: ((IslandSection) -> Void)?
     var onCapture: (() -> Void)?
     var onSettings: (() -> Void)?
@@ -364,16 +500,20 @@ final class IslandPanel {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.isMovable = false
         panel.animationBehavior = .none
         panel.appearance = NSAppearance(named: .darkAqua)
         window = panel
 
-        let root = IslandRoot()
         root.wantsLayer = true
-        panel.contentView = root
+        root.autoresizingMask = []
+        host.wantsLayer = true
+        host.layer?.masksToBounds = true
+        host.addSubview(root)
+        panel.contentView = host
+        root.frame = host.bounds
 
         let rail = NSView()
         let markView = DuckMarkView()
@@ -416,9 +556,9 @@ final class IslandPanel {
 
         root.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: root, queue: .main) { _ in
-            rail.frame = NSRect(x: 0, y: 0, width: 88, height: root.bounds.height)
-            markView.frame = NSRect(x: 44, y: root.bounds.height - 86, width: 40, height: 40)
-            var y = root.bounds.height - 132
+            rail.frame = NSRect(x: 0, y: 0, width: 88, height: self.root.bounds.height)
+            markView.frame = NSRect(x: 44, y: self.root.bounds.height - 86, width: 40, height: 40)
+            var y = self.root.bounds.height - 132
             for button in made {
                 button.frame = NSRect(x: 46, y: y, width: 36, height: 36)
                 y -= 42
@@ -426,14 +566,14 @@ final class IslandPanel {
             let bottom: CGFloat = 14
             let right: CGFloat = 48
             let barH: CGFloat = 32
-            self.topBar.frame = NSRect(x: 96, y: root.bounds.height - 12 - barH, width: max(120, root.bounds.width - 96 - right), height: barH)
+            self.topBar.frame = NSRect(x: 96, y: self.root.bounds.height - 12 - barH, width: max(120, self.root.bounds.width - 96 - right), height: barH)
             self.shotButton.frame = NSRect(x: self.topBar.bounds.width - 28, y: 4, width: 24, height: 24)
             self.soundStrip.frame = NSRect(x: 0, y: 0, width: max(0, self.shotButton.frame.minX - 8), height: barH)
-            let bodyTop = root.bounds.height - 12 - barH - 8
+            let bodyTop = self.root.bounds.height - 12 - barH - 8
             self.body.frame = NSRect(
                 x: 96,
                 y: bottom,
-                width: max(120, root.bounds.width - 96 - right),
+                width: max(120, self.root.bounds.width - 96 - right),
                 height: max(80, bodyTop - bottom)
             )
             if let visible = self.body.subviews.first {
@@ -455,11 +595,17 @@ final class IslandPanel {
     func show(on screen: NSScreen) {
         let target = frame(on: screen)
         if window.isVisible && roughly(window.frame, target) && slideTimer == nil { return }
-        let tucked = CGRect(x: target.minX, y: screen.frame.maxY, width: target.width, height: target.height)
+        let tucked = CGRect(x: target.minX, y: screen.frame.maxY, width: target.width, height: 0)
+        resting = target
         window.alphaValue = 1
         if !window.isVisible {
             window.setFrame(tucked, display: false)
+            pinResting()
+            root.setReveal(0)
             window.orderFrontRegardless()
+        } else {
+            pinResting()
+            root.setReveal(window.frame.height)
         }
         slide(from: window.frame, to: target, orderOut: false)
     }
@@ -468,7 +614,7 @@ final class IslandPanel {
         guard window.isVisible else { return }
         let frame = window.frame
         let top = (window.screen ?? NSScreen.main)?.frame.maxY ?? frame.maxY
-        let tucked = CGRect(x: frame.minX, y: top, width: frame.width, height: frame.height)
+        let tucked = CGRect(x: resting.minX, y: top, width: resting.width, height: 0)
         slide(from: frame, to: tucked, orderOut: true)
     }
 
@@ -479,7 +625,7 @@ final class IslandPanel {
         window.orderOut(nil)
     }
 
-    /// Выезд из-за кромки. Аниматор окна у неактивного агента не тикает, поэтому кадры сами.
+    /// Капля от кромки: верх на месте, растёт высота. Аниматор окна у неактивного агента не тикает, поэтому кадры сами.
     private func slide(from: CGRect, to: CGRect, orderOut: Bool) {
         slideTimer?.invalidate()
         slideFrom = from
@@ -504,12 +650,26 @@ final class IslandPanel {
             width: slideFrom.width + (slideTo.width - slideFrom.width) * eased,
             height: slideFrom.height + (slideTo.height - slideFrom.height) * eased
         )
-        window.setFrame(frame, display: true)
+        window.setFrame(frame, display: false)
+        pinResting()
+        if progress >= 1, !slideOrderOut {
+            root.setReveal(nil)
+        } else {
+            root.setReveal(frame.height)
+        }
+        window.displayIfNeeded()
         if progress >= 1 {
             timer.invalidate()
             slideTimer = nil
             if slideOrderOut { window.orderOut(nil) }
         }
+    }
+
+    /// Корень полного размера: верх у кромки окна, низ обрезает само окно.
+    private func pinResting() {
+        let full = resting
+        guard full.width > 0, full.height > 0 else { return }
+        root.frame = NSRect(x: 0, y: host.bounds.height - full.height, width: full.width, height: full.height)
     }
 
     func select(_ section: IslandSection) {
