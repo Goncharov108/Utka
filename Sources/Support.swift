@@ -40,6 +40,63 @@ enum BookmarkStore {
         var stale = false
         return try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale)
     }
+
+    /// Живой адрес файла. Если он уже в Корзине, отдаёт копию вне неё: оттуда Мак файл не открывает и не отдаёт на стол.
+    static func locate(bookmark: String?, path: String?, name: String) -> URL? {
+        if let raw = bookmark, let data = Data(base64Encoded: raw),
+           let url = url(from: data),
+           let usable = outsideTrash(url) {
+            return usable
+        }
+        if let path, FileManager.default.fileExists(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        let cached = cachedCopy(named: name)
+        if FileManager.default.fileExists(atPath: cached.path) { return cached }
+        return nil
+    }
+
+    /// Корзина блокирует и двойной щелчок, и перенос. Копия лежит у утки и ведёт себя как обычный файл.
+    private static func outsideTrash(_ url: URL) -> URL? {
+        let started = url.startAccessingSecurityScopedResource()
+        defer { if started { url.stopAccessingSecurityScopedResource() } }
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        guard isInTrash(url) else { return url }
+        let dest = cachedCopy(named: url.lastPathComponent)
+        if sameByteCount(url.path, dest.path) { return dest }
+        try? FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let partial = dest.deletingLastPathComponent().appendingPathComponent("." + dest.lastPathComponent + ".part")
+        try? FileManager.default.removeItem(at: partial)
+        do {
+            try FileManager.default.copyItem(atPath: url.path, toPath: partial.path)
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try FileManager.default.removeItem(at: dest)
+            }
+            try FileManager.default.moveItem(at: partial, to: dest)
+            return dest
+        } catch {
+            try? FileManager.default.removeItem(at: partial)
+            return FileManager.default.fileExists(atPath: dest.path) ? dest : nil
+        }
+    }
+
+    private static func isInTrash(_ url: URL) -> Bool {
+        let parts = url.standardizedFileURL.pathComponents
+        return parts.contains(".Trash") || parts.contains(".Trashes")
+    }
+
+    private static func cachedCopy(named name: String) -> URL {
+        UtkaPaths.support
+            .appendingPathComponent("FromTrash", isDirectory: true)
+            .appendingPathComponent(name)
+    }
+
+    private static func sameByteCount(_ left: String, _ right: String) -> Bool {
+        guard FileManager.default.fileExists(atPath: right) else { return false }
+        let leftSize = (try? FileManager.default.attributesOfItem(atPath: left)[.size] as? NSNumber)?.intValue
+        let rightSize = (try? FileManager.default.attributesOfItem(atPath: right)[.size] as? NSNumber)?.intValue
+        return leftSize != nil && leftSize == rightSize
+    }
 }
 
 /// Общие цвета и шрифт. Только системный гротеск.
@@ -99,19 +156,28 @@ func oneLine(_ text: String, limit: Int = 80) -> String {
     return String(flat.prefix(limit)) + "…"
 }
 
-/// Карточка файла: превью, имя, вытаскивание наружу.
+/// Карточка файла: превью, имя, вытаскивание наружу, двойной щелчок открывает файл.
 final class FileCardView: NSView, NSDraggingSource {
     var fileURL: URL?
     var consumeOnDrop = false
     var onRemove: (() -> Void)?
     var onDrag: ((Bool) -> Void)?
     var onEdit: (() -> Void)? { didSet { updatePencil() } }
+    /// Полка: драг начался, это имя нельзя сразу забирать со стола.
+    var onExportBegan: ((String) -> Void)?
+    /// Полка: драг отменён, защиту имени можно снять.
+    var onExportCancel: ((String) -> Void)?
+    /// Полка: дроп удался. Карточка уходит, файл стирается, когда получатель его отпустил.
+    var onConsume: (() -> Void)?
 
     private let iconView = NSImageView()
     private let nameLabel = UtkaChrome.label("", size: 11, color: UtkaChrome.dim)
     private let removeButton = NSButton()
     private let editButton = NSButton()
     private var didDrag = false
+    private var dragName: String?
+    private var lastClickAt = Date.distantPast
+    private var lastClickPoint = NSPoint.zero
     private var showsPicture = false
 
     override init(frame frameRect: NSRect) {
@@ -177,13 +243,33 @@ final class FileCardView: NSView, NSDraggingSource {
         editButton.frame = NSRect(x: 4, y: bounds.height - 20, width: 18, height: 18)
     }
 
+    /// Щелчок по превью и имени идёт в карточку. Крестик и карандаш остаются кнопками.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        if hit === removeButton || hit === editButton { return hit }
+        if hit.isDescendant(of: removeButton) || hit.isDescendant(of: editButton) { return hit }
+        return self
+    }
+
     override func mouseDown(with event: NSEvent) {
         didDrag = false
+        let now = Date()
+        let near = hypot(event.locationInWindow.x - lastClickPoint.x, event.locationInWindow.y - lastClickPoint.y) < 6
+        let quick = now.timeIntervalSince(lastClickAt) <= NSEvent.doubleClickInterval
+        if event.clickCount >= 2 || (near && quick) {
+            lastClickAt = .distantPast
+            openFile()
+            return
+        }
+        lastClickAt = now
+        lastClickPoint = event.locationInWindow
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard !didDrag, let url = fileURL else { return }
         didDrag = true
+        dragName = url.lastPathComponent
+        onExportBegan?(url.lastPathComponent)
         onDrag?(true)
         let item = NSDraggingItem(pasteboardWriter: url as NSURL)
         item.setDraggingFrame(NSRect(x: 0, y: 0, width: 48, height: 48), contents: iconView.image)
@@ -197,11 +283,19 @@ final class FileCardView: NSView, NSDraggingSource {
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         onDrag?(false)
         didDrag = false
-        guard consumeOnDrop, !operation.isEmpty else { return }
-        let remove = onRemove
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-            remove?()
+        let name = dragName
+        dragName = nil
+        guard consumeOnDrop, !operation.isEmpty else {
+            if let name { onExportCancel?(name) }
+            return
         }
+        onConsume?()
+    }
+
+    /// Открывает файл той программой, которую Мак выбрал для этого типа. PDF — как обычный PDF.
+    private func openFile() {
+        guard let url = fileURL, FileManager.default.fileExists(atPath: url.path) else { return }
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func removeTapped() {
