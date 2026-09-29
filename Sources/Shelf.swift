@@ -439,6 +439,9 @@ final class ShelfView: NSView {
         addSubview(empty)
         registerForDraggedTypes([.fileURL])
         model.onChange = { [weak self] in self?.rebuild() }
+        NotificationCenter.default.addObserver(forName: IslandLook.changed, object: nil, queue: .main) { [weak self] _ in
+            self?.empty.textColor = UtkaChrome.dim
+        }
         rebuild()
     }
 

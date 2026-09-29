@@ -174,7 +174,7 @@ final class PresetsView: NSView {
             .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
         addButton.imagePosition = .imageOnly
         addButton.bezelStyle = .circular
-        addButton.contentTintColor = .white
+        addButton.contentTintColor = UtkaChrome.ink
         addButton.target = self
         addButton.action = #selector(addText)
         addSubview(tabControl)
@@ -187,7 +187,17 @@ final class PresetsView: NSView {
         addSubview(addButton)
         registerForDraggedTypes([.fileURL])
         model.onChange = { [weak self] in self?.rebuild() }
+        NotificationCenter.default.addObserver(self, selector: #selector(retintPresets), name: IslandLook.changed, object: nil)
         rebuild()
+    }
+
+    /// Поля и подписи заготовок под текущий вид.
+    @objc private func retintPresets() {
+        styleField(titleField, placeholder: "Название")
+        styleField(bodyField, placeholder: "Фраза, адрес или ссылка")
+        addButton.contentTintColor = UtkaChrome.ink
+        emptyLabel.textColor = UtkaChrome.dim
+        errorLabel.textColor = UtkaChrome.dim
     }
 
     required init?(coder: NSCoder) { nil }
@@ -330,8 +340,8 @@ final class PresetsView: NSView {
     private func styleField(_ field: NSTextField, placeholder: String) {
         field.placeholderString = placeholder
         field.font = UtkaChrome.font(12)
-        field.textColor = .white
-        field.backgroundColor = NSColor.white.withAlphaComponent(0.08)
+        field.textColor = UtkaChrome.ink
+        field.backgroundColor = UtkaChrome.card
         field.isBordered = false
         field.focusRingType = .none
         field.bezelStyle = .roundedBezel

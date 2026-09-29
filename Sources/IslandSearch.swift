@@ -520,9 +520,15 @@ final class SearchDrop: NSView {
             return button
         }
         wantsLayer = true
-        layer?.backgroundColor = NSColor.black.cgColor
+        layer?.backgroundColor = IslandLook.solid.cgColor
         layer?.cornerRadius = 8
         layer?.masksToBounds = true
+        paint()
+    }
+
+    /// Плотная плашка списка, чтобы строки читались и на стекле.
+    func retint() {
+        layer?.backgroundColor = IslandLook.solid.cgColor
         paint()
     }
 

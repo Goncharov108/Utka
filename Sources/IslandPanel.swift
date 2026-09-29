@@ -74,10 +74,18 @@ final class IslandRoot: NSView {
     private let bottomRadius: CGFloat = 36
     /// Высота капли от кромки. nil — весь островок.
     private var revealHeight: CGFloat?
-    /// Чёрная дуга. Вектор, не картинка.
+    /// Чёрная дуга. Вектор, не картинка. Заливка живёт на вуали, дуга только держит форму.
     private let shape = CAShapeLayer()
     /// Та же дуга обрезает содержимое.
     private let clip = CAShapeLayer()
+    /// Матовое стекло под вуалью. При нулевой прозрачности спрятано.
+    private let frost = NSVisualEffectView()
+    /// Плотная заливка. Прозрачность стекла её разбавляет.
+    private let veil = NSView()
+    private let frostMask = CAShapeLayer()
+    private let veilMask = CAShapeLayer()
+    private var plantedGlass = false
+    private var wasDark = IslandLook.dark
     /// Нижняя дуга выше кромки окна, прямоугольник её не срезает.
     private let bottomInset: CGFloat = 2
 
@@ -113,8 +121,16 @@ final class IslandRoot: NSView {
         let clipBounds = CGRect(x: 0, y: full.height - visible + bottomInset, width: full.width, height: drawn)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        plantGlass()
+        frost.frame = full
+        veil.frame = full
+        frost.appearance = IslandLook.appearance
+        frost.isHidden = IslandLook.glass < 0.02
+        veil.layer?.backgroundColor = IslandLook.veil.cgColor
+        frostMask.frame = full
+        veilMask.frame = full
         shape.contentsScale = screen
-        shape.fillColor = NSColor.black.cgColor
+        shape.fillColor = NSColor.clear.cgColor
         shape.allowsEdgeAntialiasing = true
         shape.masksToBounds = false
         shape.frame = band
@@ -127,8 +143,40 @@ final class IslandRoot: NSView {
         clip.allowsEdgeAntialiasing = true
         clip.frame = CGRect(origin: .zero, size: full.size)
         clip.path = islandSilhouette(bounds: clipBounds, ear: earRadius, bottom: bottomRadius)
+        frostMask.path = clip.path
+        veilMask.path = clip.path
         layer?.mask = clip
         CATransaction.commit()
+    }
+
+    /// Стекло и вуаль под содержимым, в той же маске капли.
+    private func plantGlass() {
+        guard !plantedGlass else { return }
+        plantedGlass = true
+        frost.material = .hudWindow
+        frost.blendingMode = .behindWindow
+        frost.state = .active
+        frost.wantsLayer = true
+        veil.wantsLayer = true
+        frost.layer?.mask = frostMask
+        veil.layer?.mask = veilMask
+        addSubview(frost, positioned: .below, relativeTo: nil)
+        addSubview(veil, positioned: .above, relativeTo: frost)
+        NotificationCenter.default.addObserver(self, selector: #selector(lookChanged), name: IslandLook.changed, object: nil)
+    }
+
+    @objc private func lookChanged() {
+        frost.material = IslandLook.dark ? .hudWindow : .menu
+        needsLayout = true
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        guard IslandLook.mode == .system else { return }
+        let now = IslandLook.dark
+        guard now != wasDark else { return }
+        wasDark = now
+        IslandLook.poke()
     }
 
     /// Уши на всю кромку, пока капля высокая. У кромки экрана уши съезжают к центру.
@@ -436,7 +484,7 @@ final class SoundStrip: NSView {
         let symbol = speakerSymbol(volume: audio.volume, muted: audio.muted, adjustable: audio.canAdjustVolume || audio.canMute)
         muteButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Громкость")?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
-        muteButton.contentTintColor = muteButton.isEnabled ? UtkaChrome.ink : NSColor.white.withAlphaComponent(0.35)
+        muteButton.contentTintColor = muteButton.isEnabled ? UtkaChrome.ink : UtkaChrome.dim
     }
 
     /// Кнопка одного выхода: символ транспорта и имя.
@@ -464,9 +512,9 @@ final class SoundStrip: NSView {
         return button
     }
 
-    /// Активный выход белый на карточке, остальные приглушены.
+    /// Активный выход красится акцентным цветом, остальные приглушены.
     private func paint(_ button: NSButton, on: Bool) {
-        let color = on ? UtkaChrome.ink : NSColor.white.withAlphaComponent(0.4)
+        let color = on ? IslandLook.accent : UtkaChrome.dim
         button.contentTintColor = color
         button.attributedTitle = NSAttributedString(
             string: button.toolTip ?? "",
@@ -475,7 +523,7 @@ final class SoundStrip: NSView {
                 .foregroundColor: color
             ]
         )
-        button.layer?.backgroundColor = (on ? UtkaChrome.card : NSColor.clear).cgColor
+        button.layer?.backgroundColor = (on ? IslandLook.accent.withAlphaComponent(0.22) : NSColor.clear).cgColor
     }
 
     /// Значок динамика по громкости и беззвучию.
@@ -489,6 +537,12 @@ final class SoundStrip: NSView {
 
     @objc private func sinkClicked(_ sender: NSButton) {
         AudioOutput.shared.select(buttonTag: sender.tag)
+    }
+
+    /// Чернила поля и кнопок под текущий вид.
+    func applyChrome() {
+        searchField.textColor = UtkaChrome.ink
+        apply()
     }
 
     @objc private func muteClicked() {
@@ -551,6 +605,15 @@ final class IslandPanel {
     var onCapture: (() -> Void)?
     var onSettings: (() -> Void)?
 
+    /// Подтягивает каплю, разделы и полосу под сохранённый вид.
+    func applyLook() {
+        window.appearance = IslandLook.appearance
+        root.needsLayout = true
+        soundStrip.applyChrome()
+        searchDrop.retint()
+        showSection(current)
+    }
+
     /// Меняет полосу, кнопку снимка не двигает.
     func setBar(_ mode: IslandBarMode) {
         soundStrip.setMode(mode)
@@ -588,7 +651,7 @@ final class IslandPanel {
         panel.hidesOnDeactivate = false
         panel.isMovable = false
         panel.animationBehavior = .none
-        panel.appearance = NSAppearance(named: .darkAqua)
+        panel.appearance = IslandLook.appearance
         window = panel
 
         root.wantsLayer = true
@@ -680,6 +743,10 @@ final class IslandPanel {
         }
         NotificationCenter.default.post(name: NSView.frameDidChangeNotification, object: root)
         markView.onClick = { [weak self] in self?.onSettings?() }
+        NotificationCenter.default.addObserver(forName: IslandLook.changed, object: nil, queue: .main) { [weak self] _ in
+            self?.applyLook()
+        }
+        applyLook()
     }
 
     func bindActions(target: AnyObject, action: Selector) {
@@ -783,7 +850,7 @@ final class IslandPanel {
         body.addSubview(view)
         for button in buttons {
             let on = button.tag == section.rawValue
-            button.contentTintColor = on ? .white : NSColor.white.withAlphaComponent(0.4)
+            button.contentTintColor = on ? IslandLook.accent : UtkaChrome.dim
         }
     }
 

@@ -64,6 +64,12 @@ final class SettingsPanel: NSObject {
     private let soundCheck = installedMark()
     private let searchLabel = UtkaChrome.label("Поиск", size: 13, weight: .semibold)
     private let searchSwitch = NSSwitch()
+    private let lookLabel = UtkaChrome.label("Режим", size: 13, weight: .semibold)
+    private let lookMode = NSSegmentedControl()
+    private let glassLabel = UtkaChrome.label("Стекло", size: 13, weight: .semibold)
+    private let glassSlider = NSSlider()
+    private let accentLabel = UtkaChrome.label("Цвет", size: 13, weight: .semibold)
+    private let accentWell = NSColorWell()
     private let nativeReady = UtkaChrome.label("Языковой пакет установлен", size: 13)
     private let nativeCheck = installedMark()
     private var aligningSwitches = false
@@ -83,8 +89,8 @@ final class SettingsPanel: NSObject {
         window.title = "Настройки"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.backgroundColor = .black
-        window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = IslandLook.solid
+        window.appearance = IslandLook.appearance
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
         window.level = .popUpMenu
@@ -118,6 +124,24 @@ final class SettingsPanel: NSObject {
         mount(soundInstall, title: "Установить плагин звука", action: #selector(installSoundPlugin))
         wire(soundSwitch, action: #selector(soundToggled))
         wire(searchSwitch, action: #selector(searchToggled))
+        lookMode.segmentCount = 3
+        lookMode.setLabel("Как в системе", forSegment: 0)
+        lookMode.setLabel("Светлая", forSegment: 1)
+        lookMode.setLabel("Тёмная", forSegment: 2)
+        lookMode.trackingMode = .selectOne
+        lookMode.segmentDistribution = .fillEqually
+        lookMode.font = UtkaChrome.font(12, weight: .medium)
+        lookMode.target = self
+        lookMode.action = #selector(lookModeChanged)
+        lookMode.selectedSegment = IslandLook.mode.rawValue
+        glassSlider.minValue = 0
+        glassSlider.maxValue = 1
+        glassSlider.doubleValue = IslandLook.glass
+        glassSlider.target = self
+        glassSlider.action = #selector(glassChanged)
+        accentWell.color = IslandLook.accent
+        accentWell.target = self
+        accentWell.action = #selector(accentChanged)
         refreshIslandSwitches()
         body.addSubview(titleLabel)
         tabButtons = [
@@ -146,10 +170,18 @@ final class SettingsPanel: NSObject {
         body.addSubview(soundCheck)
         body.addSubview(searchLabel)
         body.addSubview(searchSwitch)
+        body.addSubview(lookLabel)
+        body.addSubview(lookMode)
+        body.addSubview(glassLabel)
+        body.addSubview(glassSlider)
+        body.addSubview(accentLabel)
+        body.addSubview(accentWell)
         body.addSubview(nativeReady)
         body.addSubview(nativeCheck)
         paintTabs()
         refreshNative()
+        NotificationCenter.default.addObserver(self, selector: #selector(lookChanged), name: IslandLook.changed, object: nil)
+        paintChrome()
     }
 
     /// Ставит окно по центру экрана и каждый раз открывает «Островок».
@@ -231,6 +263,12 @@ final class SettingsPanel: NSObject {
         soundCheck.isHidden = !island || !plugged
         searchLabel.isHidden = !island
         searchSwitch.isHidden = !island
+        lookLabel.isHidden = !island
+        lookMode.isHidden = !island
+        glassLabel.isHidden = !island
+        glassSlider.isHidden = !island
+        accentLabel.isHidden = !island
+        accentWell.isHidden = !island
     }
 
     /// Переключает вкладку и поджимает окно под неё.
@@ -502,7 +540,57 @@ final class SettingsPanel: NSObject {
             }
         }
         y += 8
-        return layoutToggle(searchLabel, searchSwitch, text: text, y: y)
+        y = layoutToggle(searchLabel, searchSwitch, text: text, y: y) + 18
+        return layoutLook(text: text, y: y)
+    }
+
+    /// Режим, стекло и один цвет выбранного.
+    private func layoutLook(text: NSRect, y: CGFloat) -> CGFloat {
+        var y = y
+        lookLabel.frame = NSRect(x: text.minX, y: y, width: text.width, height: 18)
+        y += 22
+        lookMode.frame = NSRect(x: text.minX, y: y, width: text.width, height: 24)
+        y += 34
+        let sliderWidth = min(180, text.width * 0.46)
+        glassLabel.frame = NSRect(x: text.minX, y: y, width: text.width - sliderWidth - 12, height: 18)
+        glassSlider.frame = NSRect(x: text.maxX - sliderWidth, y: y, width: sliderWidth, height: 18)
+        y += 28
+        accentWell.frame = NSRect(x: text.maxX - 44, y: y - 2, width: 44, height: 24)
+        accentLabel.frame = NSRect(x: text.minX, y: y, width: text.width - 56, height: 18)
+        return y + 24
+    }
+
+    @objc private func lookModeChanged() {
+        guard let next = IslandLookMode(rawValue: lookMode.selectedSegment) else { return }
+        IslandLook.mode = next
+    }
+
+    @objc private func glassChanged() {
+        IslandLook.glass = glassSlider.doubleValue
+    }
+
+    @objc private func accentChanged() {
+        IslandLook.accent = accentWell.color
+    }
+
+    /// Окно настроек тем же режимом, что островок.
+    @objc private func lookChanged() {
+        paintChrome()
+        body.needsLayout = true
+    }
+
+    /// Чернила подписей и фон окна.
+    private func paintChrome() {
+        window.appearance = IslandLook.appearance
+        window.backgroundColor = IslandLook.solid
+        let inkLabels = [titleLabel, soundLabel, searchLabel, soundReady, nativeReady, nativeTitle, versionLabel, shotCleanupLabel, lookLabel, glassLabel, accentLabel]
+        inkLabels.forEach { $0.textColor = UtkaChrome.ink }
+        let dimLabels = [soundCaption, soundNote, nativeNote, nativeState, updateLine]
+        dimLabels.forEach { $0.textColor = UtkaChrome.dim }
+        lookMode.selectedSegment = IslandLook.mode.rawValue
+        glassSlider.doubleValue = IslandLook.glass
+        accentWell.color = IslandLook.accent
+        paintTabs()
     }
 
     /// Надпись «установлен» и зелёная галка.
