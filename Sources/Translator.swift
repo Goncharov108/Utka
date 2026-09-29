@@ -5,6 +5,14 @@ struct TranslateFailure: Error {
 }
 
 /// Офлайн-перевод системной моделью en↔ru. Пакет лежит в ~/Library/Translation.
+///
+/// Класс `_LTTextSession` — приватный и не документированный: на части систем
+/// (другая версия macOS, региональные ограничения на офлайн-модель) он может
+/// не отвечать на ожидаемые методы. Вызов несуществующего метода через
+/// objc_msgSend не бросает обычную Swift-ошибку — Objective-C кидает
+/// исключение, которое ничем не поймать, и всё приложение падает разом.
+/// Поэтому каждый метод проверяется через `responds(to:)`, прежде чем
+/// вызывать его напрямую.
 enum SystemTextTranslate {
     static func translate(_ text: String, toEnglish: Bool) -> Result<String, TranslateFailure> {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -21,23 +29,34 @@ enum SystemTextTranslate {
         let maker = unsafeBitCast(raw, to: Maker.self)
         let flag = unsafeBitCast(raw, to: Flag.self)
         let run = unsafeBitCast(raw, to: Run.self)
-        guard let cls = objc_getClass("_LTTextSession") as AnyObject? else {
+        guard let anyClass = objc_getClass("_LTTextSession"),
+              let cls = unsafeBitCast(anyClass, to: AnyClass.self) as? NSObject.Type else {
+            return .failure(TranslateFailure(message: "language"))
+        }
+        let initSelector = Selector(("initWithSourceLocale:targetLocale:"))
+        guard cls.instancesRespond(to: initSelector) else {
             return .failure(TranslateFailure(message: "language"))
         }
         let source = toEnglish ? "ru_RU" : "en_US"
         let target = toEnglish ? "en_US" : "ru_RU"
         guard let session = maker(
             getter(cls, sel_registerName("alloc"))!,
-            sel_registerName("initWithSourceLocale:targetLocale:"),
+            initSelector,
             NSLocale(localeIdentifier: source),
             NSLocale(localeIdentifier: target)
-        ) else {
+        ), let sessionObject = session as? NSObject else {
             return .failure(TranslateFailure(message: "language"))
         }
-        flag(session, sel_registerName("setAllowOnlineTranslation:"), 0)
+        let flagSelector = Selector(("setAllowOnlineTranslation:"))
+        let runSelector = Selector(("translateString:completionHandler:"))
+        guard sessionObject.responds(to: flagSelector), sessionObject.responds(to: runSelector) else {
+            return .failure(TranslateFailure(message: "language"))
+        }
+        flag(session, flagSelector, 0)
         let box = TranslateBox()
         let done: @convention(block) (AnyObject?, AnyObject?) -> Void = { result, error in
-            if let result = result {
+            if let result = result,
+               (result as? NSObject)?.responds(to: Selector(("targetText"))) == true {
                 box.text = getter(result, sel_registerName("targetText")) as? String
             }
             if box.text == nil {
@@ -45,7 +64,7 @@ enum SystemTextTranslate {
             }
             box.gate.signal()
         }
-        run(session, sel_registerName("translateString:completionHandler:"), trimmed as NSString, unsafeBitCast(done, to: AnyObject.self))
+        run(session, runSelector, trimmed as NSString, unsafeBitCast(done, to: AnyObject.self))
         if box.gate.wait(timeout: .now() + 20) == .timedOut {
             return .failure(TranslateFailure(message: "timeout"))
         }
@@ -85,11 +104,24 @@ enum LanguagePacks {
     }
 
     /// Качает модель en↔ru. nil значит вызов кончился без ошибки; подпись всё равно сверяется по диску.
+    ///
+    /// `_LTLocalePair` и `_LTTranslator` — приватные классы; каждый метод
+    /// проверяется через `responds(to:)`, иначе несуществующий метод роняет
+    /// всё приложение необработанным исключением Objective-C (см. тот же
+    /// приём в SystemTextTranslate).
     static func download(completion: @escaping (String?) -> Void) {
         guard dlopen("/System/Library/Frameworks/Translation.framework/Versions/A/Translation", RTLD_NOW) != nil,
               let raw = dlsym(dlopen(nil, RTLD_NOW), "objc_msgSend"),
-              let cls = objc_getClass("_LTLocalePair") as AnyObject?,
-              let translator = objc_getClass("_LTTranslator") as AnyObject? else {
+              let pairAnyClass = objc_getClass("_LTLocalePair"),
+              let cls = unsafeBitCast(pairAnyClass, to: AnyClass.self) as? NSObject.Type,
+              let translatorAnyClass = objc_getClass("_LTTranslator"),
+              let translator = unsafeBitCast(translatorAnyClass, to: AnyClass.self) as? NSObject.Type else {
+            completion("Нет системного перевода")
+            return
+        }
+        let initSelector = Selector(("initWithSourceLocale:targetLocale:"))
+        let fetchSelector = Selector(("_downloadAssetForLanguagePair:userInitiated:completion:"))
+        guard cls.instancesRespond(to: initSelector), translator.instancesRespond(to: fetchSelector) else {
             completion("Нет системного перевода")
             return
         }
@@ -101,7 +133,7 @@ enum LanguagePacks {
         let fetch = unsafeBitCast(raw, to: Fetch.self)
         guard let pair = maker(
             getter(cls, sel_registerName("alloc"))!,
-            sel_registerName("initWithSourceLocale:targetLocale:"),
+            initSelector,
             NSLocale(localeIdentifier: "en_US"),
             NSLocale(localeIdentifier: "ru_RU")
         ) else {
@@ -157,15 +189,96 @@ enum LanguagePacks {
     }
 }
 
-/// Запасной путь через «Команды», если системная модель недоступна.
+/// Перевод через интернет без ключа и регистрации — последний запасной путь,
+/// когда офлайн-модель Apple недоступна (например, из-за региональных
+/// ограничений). Текст уходит открытым на mymemory.translated.net;
+/// это не приватно, зато работает там, где Apple ничего не даёт скачать.
+enum OnlineTranslate {
+    static func translate(_ text: String, toEnglish: Bool) -> Result<String, TranslateFailure> {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .success("") }
+        let pair = toEnglish ? "ru|en" : "en|ru"
+        var components = URLComponents(string: "https://api.mymemory.translated.net/get")
+        components?.queryItems = [
+            URLQueryItem(name: "q", value: trimmed),
+            URLQueryItem(name: "langpair", value: pair)
+        ]
+        guard let url = components?.url else {
+            return .failure(TranslateFailure(message: "Не удалось собрать запрос"))
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        let gate = DispatchSemaphore(value: 0)
+        var outcome: Result<String, TranslateFailure> = .failure(TranslateFailure(message: "Нет интернета для перевода"))
+        let task = URLSession.shared.dataTask(with: request) { data, _, error in
+            defer { gate.signal() }
+            if let error {
+                outcome = .failure(TranslateFailure(message: error.localizedDescription))
+                return
+            }
+            guard let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let responseData = json["responseData"] as? [String: Any],
+                  let translated = responseData["translatedText"] as? String,
+                  !translated.isEmpty else {
+                outcome = .failure(TranslateFailure(message: "Сервер перевода не ответил"))
+                return
+            }
+            outcome = .success(decodeEntities(translated))
+        }
+        task.resume()
+        if gate.wait(timeout: .now() + 20) == .timedOut {
+            task.cancel()
+            return .failure(TranslateFailure(message: "Не удалось дозвониться до сервера перевода"))
+        }
+        return outcome
+    }
+
+    /// MyMemory отдаёт апостроф и кавычки html-сущностями — разворачиваем нужные.
+    private static func decodeEntities(_ text: String) -> String {
+        let entities = ["&amp;": "&", "&quot;": "\"", "&#39;": "'", "&apos;": "'", "&lt;": "<", "&gt;": ">"]
+        var result = text
+        for (entity, char) in entities {
+            result = result.replacingOccurrences(of: entity, with: char)
+        }
+        return result
+    }
+}
+
+/// Запасной путь через «Команды», если системная модель недоступна,
+/// а если и «Команды» не помогли (например, офлайн-пакет Apple вообще
+/// не скачивается в этом регионе) — перевод через интернет без ключа.
 enum ShortcutTranslate {
     static func translate(_ text: String, toEnglish: Bool) -> Result<String, TranslateFailure> {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .success("") }
+        // Свой движок (utka-apps/utka-translate) — приоритетнее Apple: не зависит
+        // ни от региона, ни от компании, ни от интернета, если уже скачан.
+        if let native = NativeTranslate.translate(trimmed, toEnglish: toEnglish) {
+            if case .success(let value) = native, !value.isEmpty {
+                return .success(value)
+            }
+        }
         let system = SystemTextTranslate.translate(trimmed, toEnglish: toEnglish)
         if case .success(let value) = system, !value.isEmpty {
             return .success(value)
         }
+        if let value = viaShortcut(trimmed, toEnglish: toEnglish) {
+            return .success(value)
+        }
+        let online = OnlineTranslate.translate(trimmed, toEnglish: toEnglish)
+        if case .success(let value) = online, !value.isEmpty {
+            return .success(value)
+        }
+        offerLanguageSettings()
+        if case .failure(let error) = online {
+            return .failure(error)
+        }
+        return .failure(TranslateFailure(message: "language"))
+    }
+
+    /// Офлайн-перевод через приложение «Команды». nil — не получилось, тогда идём дальше.
+    private static func viaShortcut(_ trimmed: String, toEnglish: Bool) -> String? {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("utka-tr-\(UUID().uuidString)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -177,22 +290,18 @@ enum ShortcutTranslate {
             try Data(plist(toEnglish: toEnglish)).write(to: source)
             try Data(trimmed.utf8).write(to: input)
             let signedRun = run("/usr/bin/shortcuts", ["sign", "--mode", "anyone", "--input", source.path, "--output", signed.path])
-            guard signedRun.code == 0 else { return .failure(TranslateFailure(message: signedRun.err)) }
+            guard signedRun.code == 0 else { return nil }
             prepareInstalledShortcut(toEnglish: toEnglish)
             let named = run("/usr/bin/shortcuts", ["run", "Utka Translate", "--input-path", input.path, "--output-path", output.path, "--output-type", "public.utf8-plain-text"])
             let ran = named.code == 0 ? named : run("/usr/bin/shortcuts", ["run", signed.path, "--input-path", input.path, "--output-path", output.path])
             guard ran.code == 0 else {
                 offerShortcut(signed)
-                return .failure(TranslateFailure(message: ran.err.isEmpty ? ran.out : ran.err))
+                return nil
             }
             let value = (try? String(contentsOf: output, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !value.isEmpty else {
-                offerLanguageSettings()
-                return .failure(TranslateFailure(message: "language"))
-            }
-            return .success(value)
+            return value.isEmpty ? nil : value
         } catch {
-            return .failure(TranslateFailure(message: error.localizedDescription))
+            return nil
         }
     }
 
@@ -464,8 +573,12 @@ final class TranslatorView: NSView {
 
     private static func message(for raw: String) -> String {
         let lower = raw.lowercased()
+        if lower.contains("интернет") || lower.contains("internet") || lower.contains("offline")
+            || lower.contains("connection") || lower.contains("дозвониться") || lower.contains("сервер") {
+            return "Нет интернета для перевода"
+        }
         if lower.contains("language") || lower.contains("locale") || raw.contains("язык") || raw.contains("пакет") || raw.isEmpty {
-            return "Языковой пакет ещё не скачан"
+            return "Языковой пакет ещё не скачан, перевод через интернет тоже не получился"
         }
         return "Не удалось перевести"
     }
