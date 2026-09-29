@@ -285,11 +285,13 @@ final class FileCardView: NSView, NSDraggingSource {
         didDrag = false
         let name = dragName
         dragName = nil
-        guard consumeOnDrop, !operation.isEmpty else {
+        // Удачный перенос без снятия карточки — не отмена: имя на столе остаётся под защитой,
+        // иначе копия возвращается на полку вторым снимком.
+        guard !operation.isEmpty else {
             if let name { onExportCancel?(name) }
             return
         }
-        onConsume?()
+        if consumeOnDrop { onConsume?() }
     }
 
     /// Открывает файл той программой, которую Мак выбрал для этого типа. PDF — как обычный PDF.

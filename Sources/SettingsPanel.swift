@@ -1,35 +1,41 @@
 import AppKit
 
+/// Страница окна настроек. На экране видна одна.
+private enum SettingsPage: Int {
+    case island
+    case translate
+    case updates
+    case shot
+}
+
 /// Окно настроек. Открывается кликом по утке на островке.
 final class SettingsPanel: NSObject {
+    /// Сообщает полке, снимать ли свой снимок после переноса.
+    var onDeleteShotAfterUse: ((Bool) -> Void)?
+
     private let window: NSWindow
     private let body = SettingsBody()
     private let titleLabel = UtkaChrome.label("Настройки", size: 18, weight: .semibold)
-    private let hints: [NSTextField]
+    private var tabButtons: [NSButton] = []
+    private var page: SettingsPage = .island
     private let nativeTitle = UtkaChrome.label("Перевод", size: 13, weight: .semibold)
     private let nativeState = UtkaChrome.label("", size: 13, color: UtkaChrome.dim)
     private let nativeButton = NSButton()
     private let nativeNote = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
     private var nativeDownloading = false
-    private let updateTitle = UtkaChrome.label("Обновления", size: 13, weight: .semibold)
     private let versionLabel = UtkaChrome.label("", size: 13)
     private let updateButton = NSButton()
     private let restoreButton = NSButton()
     private let updateLine = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
     private let installButton = NSButton()
+    private let shotCleanupLabel = UtkaChrome.label("Удалять скрин из полки после использования", size: 13)
+    private let shotCleanup = NSSwitch()
+    private var canInstall = false
     private var checking = false
     private var installing = false
     private var restoring = false
 
     override init() {
-        hints = [
-            "Кромка по центру сверху открывает островок на этом мониторе.",
-            "Клик по утке на островке открывает вот это окно.",
-            "Полка, буфер, заготовки и перевод — разделы слева.",
-            "Снимок области — кнопка на верхней полосе.",
-            "Ползунок ведёт громкость выхода «Утка звук».",
-            "Escape прячет островок."
-        ].map { UtkaChrome.label($0, size: 12, color: UtkaChrome.dim) }
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 460),
             styleMask: [.titled, .closable, .fullSizeContentView],
@@ -48,7 +54,6 @@ final class SettingsPanel: NSObject {
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         body.arrange = { [weak self] in self?.layoutContents() }
         window.contentView = body
-        for hint in hints { body.addSubview(hint) }
         nativeState.alignment = .right
         nativeNote.maximumNumberOfLines = 2
         nativeNote.lineBreakMode = .byWordWrapping
@@ -58,26 +63,38 @@ final class SettingsPanel: NSObject {
         updateLine.lineBreakMode = .byWordWrapping
         updateLine.cell?.wraps = true
         versionLabel.stringValue = Self.visibleVersion()
-        versionLabel.alignment = .right
         mount(updateButton, title: "Проверить обновления", action: #selector(checkUpdates))
         mount(restoreButton, title: "Вернуть предыдущую", action: #selector(restorePrevious))
         mount(installButton, title: "Установить", action: #selector(installUpdate))
-        installButton.isHidden = true
+        shotCleanupLabel.maximumNumberOfLines = 2
+        shotCleanupLabel.lineBreakMode = .byWordWrapping
+        shotCleanupLabel.cell?.wraps = true
+        shotCleanup.target = self
+        shotCleanup.action = #selector(shotCleanupToggled)
+        shotCleanup.state = ShelfModel.deleteShotAfterUse ? .on : .off
         body.addSubview(titleLabel)
+        tabButtons = [
+            makeTab("Островок", page: .island),
+            makeTab("Скрин", page: .shot),
+            makeTab("Перевод", page: .translate),
+            makeTab("Обновления", page: .updates)
+        ]
         body.addSubview(nativeTitle)
         body.addSubview(nativeState)
         body.addSubview(nativeButton)
         body.addSubview(nativeNote)
-        refreshNative()
-        body.addSubview(updateTitle)
         body.addSubview(versionLabel)
         body.addSubview(updateButton)
         body.addSubview(restoreButton)
         body.addSubview(updateLine)
         body.addSubview(installButton)
+        body.addSubview(shotCleanupLabel)
+        body.addSubview(shotCleanup)
+        paintTabs()
+        refreshNative()
     }
 
-    /// Ставит окно по центру экрана островка.
+    /// Ставит окно по центру экрана и каждый раз открывает «Островок».
     func show(on screen: NSScreen?) {
         let size = window.frame.size
         let area = (screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: size.width, height: size.height)
@@ -90,7 +107,75 @@ final class SettingsPanel: NSObject {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(body)
+        shotCleanup.state = ShelfModel.deleteShotAfterUse ? .on : .off
         refreshNative()
+        select(.island)
+    }
+
+    /// Вкладка без рамки. Белая, когда выбрана.
+    private func makeTab(_ title: String, page: SettingsPage) -> NSButton {
+        let button = NSButton()
+        button.title = title
+        button.tag = page.rawValue
+        button.isBordered = false
+        button.target = self
+        button.action = #selector(tabClicked(_:))
+        body.addSubview(button)
+        return button
+    }
+
+    /// Красит выбранную вкладку белым, остальные приглушает.
+    private func paintTabs() {
+        let titles = ["Островок", "Перевод", "Обновления", "Скрин"]
+        for button in tabButtons {
+            let on = button.tag == page.rawValue
+            let title = titles[button.tag]
+            button.title = title
+            button.attributedTitle = NSAttributedString(
+                string: title,
+                attributes: [
+                    .font: UtkaChrome.font(13, weight: on ? .semibold : .medium),
+                    .foregroundColor: on ? UtkaChrome.ink : UtkaChrome.dim
+                ]
+            )
+            button.sizeToFit()
+        }
+    }
+
+    /// Показывает контролы только текущей вкладки.
+    private func applyPageVisibility() {
+        let translate = page == .translate
+        nativeTitle.isHidden = !translate
+        nativeState.isHidden = !translate
+        nativeNote.isHidden = !translate
+        nativeButton.isHidden = !translate || NativeTranslate.isInstalled
+        let updates = page == .updates
+        versionLabel.isHidden = !updates
+        updateButton.isHidden = !updates
+        restoreButton.isHidden = !updates
+        updateLine.isHidden = !updates
+        installButton.isHidden = !updates || !canInstall
+        let shot = page == .shot
+        shotCleanupLabel.isHidden = !shot
+        shotCleanup.isHidden = !shot
+    }
+
+    /// Переключает вкладку и поджимает окно под неё.
+    private func select(_ next: SettingsPage) {
+        page = next
+        paintTabs()
+        applyPageVisibility()
+        body.needsLayout = true
+    }
+
+    @objc private func tabClicked(_ sender: NSButton) {
+        guard let next = SettingsPage(rawValue: sender.tag) else { return }
+        select(next)
+    }
+
+    /// Запоминает, снимать ли свой снимок с полки после переноса.
+    @objc private func shotCleanupToggled() {
+        onDeleteShotAfterUse?(shotCleanup.state == .on)
     }
 
     /// Свой офлайн-движок перевода: utka-apps/utka-translate. Единственный
@@ -100,11 +185,11 @@ final class SettingsPanel: NSObject {
         let ready = NativeTranslate.isInstalled
         nativeState.stringValue = ready ? "скачан" : "нет"
         nativeState.textColor = ready ? UtkaChrome.ink : UtkaChrome.dim
-        nativeButton.isHidden = ready
         nativeButton.isEnabled = !nativeDownloading
         if ready {
             nativeNote.stringValue = ""
         }
+        applyPageVisibility()
         body.needsLayout = true
     }
 
@@ -138,10 +223,11 @@ final class SettingsPanel: NSObject {
     @objc private func checkUpdates() {
         guard !checking, !installing, !restoring else { return }
         checking = true
-        installButton.isHidden = true
+        canInstall = false
         updateButton.isEnabled = false
         restoreButton.isEnabled = false
         updateLine.stringValue = "Проверяю общий main…"
+        applyPageVisibility()
         body.needsLayout = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let report = AppUpdate.look()
@@ -150,8 +236,9 @@ final class SettingsPanel: NSObject {
                 self.checking = false
                 self.updateButton.isEnabled = true
                 self.restoreButton.isEnabled = true
-                self.installButton.isHidden = !report.canInstall
+                self.canInstall = report.canInstall
                 self.updateLine.stringValue = report.text
+                self.applyPageVisibility()
                 self.body.needsLayout = true
             }
         }
@@ -159,7 +246,7 @@ final class SettingsPanel: NSObject {
 
     /// Забирает общий main, собирает утку и открывает её заново.
     @objc private func installUpdate() {
-        guard !installing, !restoring, !installButton.isHidden else { return }
+        guard !installing, !restoring, canInstall else { return }
         installing = true
         installButton.isEnabled = false
         updateButton.isEnabled = false
@@ -209,7 +296,7 @@ final class SettingsPanel: NSObject {
                     self.restoring = false
                     self.restoreButton.isEnabled = true
                     self.updateButton.isEnabled = true
-                    self.installButton.isEnabled = !self.installButton.isHidden
+                    self.installButton.isEnabled = self.canInstall
                     self.updateLine.stringValue = error
                     self.body.needsLayout = true
                     return
@@ -230,16 +317,40 @@ final class SettingsPanel: NSObject {
     }
 
     private func layoutContents() {
+        applyPageVisibility()
         let width = body.bounds.width
         let text = NSRect(x: 22, y: 0, width: max(120, width - 44), height: 0)
         var y: CGFloat = 40
         titleLabel.frame = NSRect(x: text.minX, y: y, width: text.width, height: 24)
         y += 34
-        for hint in hints {
-            hint.frame = NSRect(x: text.minX, y: y, width: text.width, height: 16)
-            y += 22
+        y = layoutTabs(x: text.minX, y: y) + 16
+        switch page {
+        case .island:
+            break
+        case .translate:
+            y = layoutTranslate(text: text, y: y)
+        case .updates:
+            y = layoutUpdates(text: text, y: y)
+        case .shot:
+            y = layoutShot(text: text, y: y)
         }
-        y += 10
+        fitWindow(contentBottom: y + 8)
+    }
+
+    /// Ряд вкладок. Возвращает его низ.
+    private func layoutTabs(x: CGFloat, y: CGFloat) -> CGFloat {
+        var cursor = x
+        for button in tabButtons {
+            let width = max(button.fittingSize.width, 24)
+            button.frame = NSRect(x: cursor, y: y, width: width, height: 22)
+            cursor += width + 18
+        }
+        return y + 22
+    }
+
+    /// Блок своего движка перевода.
+    private func layoutTranslate(text: NSRect, y: CGFloat) -> CGFloat {
+        var y = y
         nativeTitle.frame = NSRect(x: text.minX, y: y, width: text.width - 88, height: 16)
         nativeState.frame = NSRect(x: text.maxX - 88, y: y, width: 88, height: 16)
         y += 22
@@ -251,9 +362,13 @@ final class SettingsPanel: NSObject {
             nativeNote.frame = NSRect(x: text.minX, y: y, width: text.width, height: 32)
             y += 36
         }
-        y += 8
-        updateTitle.frame = NSRect(x: text.minX, y: y, width: text.width - 88, height: 16)
-        versionLabel.frame = NSRect(x: text.maxX - 88, y: y, width: 88, height: 16)
+        return y
+    }
+
+    /// Номер, проверка, возврат и установка.
+    private func layoutUpdates(text: NSRect, y: CGFloat) -> CGFloat {
+        var y = y
+        versionLabel.frame = NSRect(x: text.minX, y: y, width: text.width, height: 16)
         y += 24
         let updateWidth = updateButton.frame.width + 8
         let restoreWidth = restoreButton.frame.width + 8
@@ -281,7 +396,29 @@ final class SettingsPanel: NSObject {
             installButton.frame = NSRect(x: text.minX, y: y, width: installButton.frame.width + 8, height: 28)
             y += 36
         }
-        fitWindow(contentBottom: y + 8)
+        return y
+    }
+
+    /// Подпись слева, боковой тумблер справа.
+    private func layoutShot(text: NSRect, y: CGFloat) -> CGFloat {
+        let switchSize = shotCleanup.fittingSize
+        let gap: CGFloat = 12
+        let labelWidth = max(80, text.width - switchSize.width - gap)
+        let measured = (shotCleanupLabel.stringValue as NSString).boundingRect(
+            with: NSSize(width: labelWidth, height: 44),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: shotCleanupLabel.font as Any]
+        )
+        let labelHeight = max(18, ceil(measured.height))
+        let row = max(labelHeight, switchSize.height)
+        shotCleanupLabel.frame = NSRect(x: text.minX, y: y + (row - labelHeight) / 2, width: labelWidth, height: labelHeight)
+        shotCleanup.frame = NSRect(
+            x: text.maxX - switchSize.width,
+            y: y + (row - switchSize.height) / 2,
+            width: switchSize.width,
+            height: switchSize.height
+        )
+        return y + row
     }
 
     /// Держит верх окна на месте и убирает пустоту под последней строкой.

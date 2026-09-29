@@ -19,6 +19,9 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let support = UtkaPaths.support
         history = ClipboardHistory(storeURL: support.appendingPathComponent("clipboard.json"))
         shelf = ShelfModel(storeURL: support.appendingPathComponent("shelf.json"))
+        settings.onDeleteShotAfterUse = { [weak shelf] on in
+            shelf?.setDeleteShotAfterUse(on)
+        }
         ShotEditor.shelf = shelf
         presets = PresetsModel(storeURL: support.appendingPathComponent("presets.json"))
 
@@ -81,6 +84,9 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let show = NSMenuItem(title: "Показать", action: #selector(showNow), keyEquivalent: "")
         show.target = self
         menu.addItem(show)
+        let settingsItem = NSMenuItem(title: "Настройки", action: #selector(openSettingsFromMenu), keyEquivalent: "")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Выход", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
@@ -116,6 +122,13 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Окно настроек на том экране, где открыт островок.
     private func showSettings() {
         settings.show(on: panel.window.screen)
+    }
+
+    /// То же окно из меню строки, на экране под курсором.
+    @objc private func openSettingsFromMenu() {
+        let point = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? panel.window.screen
+        settings.show(on: screen)
     }
 
     /// Если доступ уже выдали живому процессу — сразу открыть крестик.
