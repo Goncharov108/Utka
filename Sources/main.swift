@@ -34,8 +34,8 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         hover = HoverMonitor()
         panel = IslandPanel(shelf: shelfView, clipboard: clipboardView, presets: presetsView, translator: translator, mark: mark)
-        settings.onIslandBar = { [weak panel] mode in
-            panel?.setBar(mode)
+        settings.onIslandBar = { [weak panel] in
+            panel?.setBar()
         }
         panel.bindActions(target: self, action: #selector(sectionClicked(_:)))
         panel.onSection = { [weak self] section in

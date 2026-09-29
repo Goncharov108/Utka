@@ -1,23 +1,33 @@
 import AppKit
 
-/// Что стоит на верхней полосе островка. Оба особых режима сразу не живут.
-enum IslandBarMode: Int {
-    case plain
-    case sound
-    case search
+/// Звук и поиск на полосе. Включаются независимо и оба сразу.
+enum IslandBar {
+    private static let soundKey = "islandSound"
+    private static let searchKey = "islandSearch"
+    private static let legacyKey = "islandBar"
 
-    private static let key = "islandBar"
+    static var sound: Bool {
+        get { stored(soundKey) }
+        set { UserDefaults.standard.set(newValue, forKey: soundKey) }
+    }
 
-    /// Сохранённый режим. Без ключа полоса как раньше: ползунок и выходы.
-    static var current: IslandBarMode {
-        get {
-            guard let raw = UserDefaults.standard.object(forKey: key) as? Int,
-                  let mode = IslandBarMode(rawValue: raw) else { return .plain }
-            return mode
-        }
-        set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: key)
-        }
+    static var search: Bool {
+        get { stored(searchKey) }
+        set { UserDefaults.standard.set(newValue, forKey: searchKey) }
+    }
+
+    private static func stored(_ key: String) -> Bool {
+        migrate()
+        return UserDefaults.standard.bool(forKey: key)
+    }
+
+    /// Старый режим «или звук, или поиск» раскладывается на два флажка.
+    private static func migrate() {
+        guard UserDefaults.standard.object(forKey: soundKey) == nil,
+              UserDefaults.standard.object(forKey: searchKey) == nil else { return }
+        let old = UserDefaults.standard.object(forKey: legacyKey) as? Int ?? 0
+        UserDefaults.standard.set(old == 1, forKey: soundKey)
+        UserDefaults.standard.set(old == 2, forKey: searchKey)
     }
 }
 private enum SettingsPage: Int {
@@ -32,7 +42,7 @@ final class SettingsPanel: NSObject {
     /// Сообщает полке, снимать ли свой снимок после переноса.
     var onDeleteShotAfterUse: ((Bool) -> Void)?
     /// Меняет верхнюю полосу островка.
-    var onIslandBar: ((IslandBarMode) -> Void)?
+    var onIslandBar: (() -> Void)?
 
     private let window: NSWindow
     private let body = SettingsBody()
@@ -80,7 +90,6 @@ final class SettingsPanel: NSObject {
     private let strokeOverlay = SettingsStroke()
     private let nativeReady = UtkaChrome.label("Языковой пакет установлен", size: 13)
     private let nativeCheck = installedMark()
-    private var aligningSwitches = false
     private var canInstall = false
     private var checking = false
     private var installing = false
@@ -325,47 +334,22 @@ final class SettingsPanel: NSObject {
         onDeleteShotAfterUse?(shotCleanup.state == .on)
     }
 
-    /// Включает звук на полосе и гасит поиск. Оба сразу остаются выключенными, если этот сняли.
+    /// Включает источники звука на полосе. Поиск не трогает.
     @objc private func soundToggled() {
-        guard !aligningSwitches else { return }
-        aligningSwitches = true
-        if soundSwitch.state == .on {
-            searchSwitch.state = .off
-            IslandBarMode.current = .sound
-        } else {
-            IslandBarMode.current = .plain
-        }
-        aligningSwitches = false
-        onIslandBar?(IslandBarMode.current)
+        IslandBar.sound = soundSwitch.state == .on
+        onIslandBar?()
     }
 
-    /// Включает поиск на полосе и гасит звук. Оба сразу остаются выключенными, если этот сняли.
+    /// Включает поле поиска на полосе. Звук не трогает.
     @objc private func searchToggled() {
-        guard !aligningSwitches else { return }
-        aligningSwitches = true
-        if searchSwitch.state == .on {
-            soundSwitch.state = .off
-            IslandBarMode.current = .search
-        } else {
-            IslandBarMode.current = .plain
-        }
-        aligningSwitches = false
-        onIslandBar?(IslandBarMode.current)
+        IslandBar.search = searchSwitch.state == .on
+        onIslandBar?()
     }
 
-    /// Ставит тумблеры по сохранённому режиму. По умолчанию оба выключены.
+    /// Ставит тумблеры по сохранённым флажкам. По умолчанию оба выключены.
     private func refreshIslandSwitches() {
-        switch IslandBarMode.current {
-        case .sound:
-            soundSwitch.state = .on
-            searchSwitch.state = .off
-        case .search:
-            soundSwitch.state = .off
-            searchSwitch.state = .on
-        case .plain:
-            soundSwitch.state = .off
-            searchSwitch.state = .off
-        }
+        soundSwitch.state = IslandBar.sound ? .on : .off
+        searchSwitch.state = IslandBar.search ? .on : .off
     }
 
     /// Просит плагин. Без релиза в системную папку ничего не пишет.

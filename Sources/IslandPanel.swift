@@ -390,18 +390,23 @@ private final class VolumeSlider: NSSlider {
     }
 }
 
-/// Громкость и кнопки выходов на верхней полосе, слева от снимка.
+/// Громкость, круглая кнопка источников и поле поиска. Слева от снимка.
 final class SoundStrip: NSView {
     private let muteButton = NSButton()
     private let slider = VolumeSlider()
+    private let sourcesButton = NSButton()
     private let searchField = NSSearchField()
-    private var deviceButtons: [NSButton] = []
-    private var shown: [AudioOutput.Sink] = []
     private var trackingVolume = false
-    private var mode = IslandBarMode.current
+    private var soundOn = IslandBar.sound
+    private var searchOn = IslandBar.search
+    private var sourcesOpen = false
     var onLookup: ((String) -> Void)?
     var onMove: ((Int) -> Void)?
     var onCommit: (() -> Void)?
+    /// Круглая кнопка открывает или закрывает список выходов.
+    var onToggleSources: (() -> Void)?
+    /// Список выходов или громкость изменились.
+    var onAudio: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -428,6 +433,20 @@ final class SoundStrip: NSView {
         }
         addSubview(slider)
 
+        sourcesButton.isBordered = false
+        sourcesButton.imagePosition = .imageOnly
+        sourcesButton.imageScaling = .scaleProportionallyDown
+        sourcesButton.image = NSImage(systemSymbolName: "hifispeaker", accessibilityDescription: "Источники звука")?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        sourcesButton.toolTip = "Источники звука"
+        sourcesButton.target = self
+        sourcesButton.action = #selector(sourcesClicked)
+        sourcesButton.focusRingType = .none
+        sourcesButton.wantsLayer = true
+        sourcesButton.layer?.cornerRadius = 12
+        sourcesButton.layer?.masksToBounds = true
+        addSubview(sourcesButton)
+
         searchField.font = UtkaChrome.font(12)
         searchField.textColor = UtkaChrome.ink
         searchField.placeholderString = "Поиск Spotlight"
@@ -449,65 +468,60 @@ final class SoundStrip: NSView {
         }
     }
 
-    /// Поиск ставит поле на место выходов. Звук мониторы не прячет.
-    func setMode(_ mode: IslandBarMode) {
-        self.mode = mode
-        if mode != .search {
+    /// Звук и поиск ставятся рядом. Выключенный звук прячет круглую кнопку.
+    func setBar(sound: Bool, search: Bool) {
+        let wasSearch = searchOn
+        soundOn = sound
+        searchOn = search
+        if !search, wasSearch {
             searchField.stringValue = ""
             onLookup?("")
         }
+        if !sound { sourcesOpen = false }
         place()
+        paintSourcesButton()
+    }
+
+    /// Кружок подсвечен, пока список источников открыт.
+    func setSourcesOpen(_ open: Bool) {
+        sourcesOpen = open
+        paintSourcesButton()
     }
 
     /// Прямоугольник поля в координатах островка.
     func fieldFrame(in view: NSView) -> NSRect? {
-        guard mode == .search, !searchField.isHidden, searchField.bounds.width > 1 else { return nil }
+        guard searchOn, !searchField.isHidden, searchField.bounds.width > 1 else { return nil }
         return searchField.convert(searchField.bounds, to: view)
     }
 
-    /// Ползунок и мониторы остаются. Поиск занимает только место кнопок выходов.
+    /// Прямоугольник круглой кнопки в координатах островка.
+    func sourcesFrame(in view: NSView) -> NSRect? {
+        guard soundOn, !sourcesButton.isHidden, sourcesButton.bounds.width > 1 else { return nil }
+        return sourcesButton.convert(sourcesButton.bounds, to: view)
+    }
+
+    /// Громкость слева. Дальше кнопка источников, если звук включён, и поле поиска.
     private func place() {
-        let searching = mode == .search
+        let bar = bounds.height
         muteButton.isHidden = false
         slider.isHidden = false
-        searchField.isHidden = !searching
-        for button in deviceButtons {
-            button.isHidden = searching
-        }
-        let bar = bounds.height
         muteButton.frame = NSRect(x: 0, y: (bar - 24) / 2, width: 24, height: 24)
         let sliderWidth = min(120, max(72, bounds.width * 0.22))
         slider.frame = NSRect(x: 28, y: (bar - 18) / 2, width: sliderWidth, height: 18)
-        let origin = slider.frame.maxX + 8
-        let available = bounds.width - origin
-        if searching {
-            searchField.frame = NSRect(x: origin, y: (bar - 22) / 2, width: max(40, available), height: 22)
-            return
+        var origin = slider.frame.maxX + 8
+        sourcesButton.isHidden = !soundOn
+        if soundOn {
+            sourcesButton.frame = NSRect(x: origin, y: (bar - 24) / 2, width: 24, height: 24)
+            origin += 32
         }
-        let count = deviceButtons.count
-        guard count > 0 else { return }
-        let gap: CGFloat = 4
-        let slots = CGFloat(count)
-        let width = max(0, (available - gap * (slots - 1)) / slots)
-        var x = origin
-        for button in deviceButtons {
-            button.frame = NSRect(x: x, y: (bar - 24) / 2, width: width, height: 24)
-            x += width + gap
-        }
+        searchField.isHidden = !searchOn
+        guard searchOn else { return }
+        searchField.frame = NSRect(x: origin, y: (bar - 22) / 2, width: max(40, bounds.width - origin), height: 22)
     }
 
-    /// Пересобирает кнопки, если список выходов изменился, и подсвечивает текущий.
+    /// Подтягивает громкость и значок текущего выхода.
     private func apply() {
         let audio = AudioOutput.shared
-        if audio.sinks != shown {
-            shown = audio.sinks
-            deviceButtons.forEach { $0.removeFromSuperview() }
-            deviceButtons = shown.map(makeSinkButton)
-            place()
-        }
-        for button in deviceButtons {
-            paint(button, on: button.tag == Int(audio.currentID))
-        }
         slider.isEnabled = audio.canAdjustVolume
         slider.alphaValue = audio.canAdjustVolume ? 1 : 0.35
         slider.toolTip = audio.canAdjustVolume ? "Громкость" : "Нет регулировки"
@@ -515,62 +529,25 @@ final class SoundStrip: NSView {
             slider.doubleValue = Double(audio.volume)
         }
         muteButton.isEnabled = audio.canMute
-        let symbol = speakerSymbol(volume: audio.volume, muted: audio.muted, adjustable: audio.canAdjustVolume || audio.canMute)
-        muteButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Громкость")?
+        let sink = audio.sinks.first { $0.id == audio.currentID }
+        let symbol = sink?.symbol ?? "speaker.wave.2"
+        muteButton.toolTip = sink?.name ?? "Беззвучие"
+        muteButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: sink?.name ?? "Выход")?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
-        muteButton.contentTintColor = muteButton.isEnabled ? UtkaChrome.ink : UtkaChrome.dim
+        muteButton.contentTintColor = audio.muted || !muteButton.isEnabled ? UtkaChrome.dim : UtkaChrome.ink
+        paintSourcesButton()
+        onAudio?()
     }
 
-    /// Кнопка одного выхода: символ транспорта и имя.
-    private func makeSinkButton(_ sink: AudioOutput.Sink) -> NSButton {
-        let button = NSButton()
-        button.isBordered = false
-        button.imagePosition = .imageLeading
-        button.imageScaling = .scaleProportionallyDown
-        button.imageHugsTitle = true
-        button.alignment = .center
-        button.lineBreakMode = .byTruncatingTail
-        button.font = UtkaChrome.font(11, weight: .medium)
-        button.title = sink.name
-        button.toolTip = sink.name
-        button.tag = Int(sink.id)
-        button.target = self
-        button.action = #selector(sinkClicked(_:))
-        button.focusRingType = .none
-        button.wantsLayer = true
-        button.layer?.cornerRadius = 6
-        button.layer?.masksToBounds = true
-        button.image = NSImage(systemSymbolName: sink.symbol, accessibilityDescription: sink.name)?
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
-        addSubview(button)
-        return button
+    /// Кружок справа от громкости. Открытый список красится акцентом.
+    private func paintSourcesButton() {
+        let color = sourcesOpen ? IslandLook.accent : UtkaChrome.ink
+        sourcesButton.contentTintColor = color
+        sourcesButton.layer?.backgroundColor = (sourcesOpen ? IslandLook.accent.withAlphaComponent(0.22) : UtkaChrome.card).cgColor
     }
 
-    /// Активный выход красится акцентным цветом, остальные приглушены.
-    private func paint(_ button: NSButton, on: Bool) {
-        let color = on ? IslandLook.accent : UtkaChrome.dim
-        button.contentTintColor = color
-        button.attributedTitle = NSAttributedString(
-            string: button.toolTip ?? "",
-            attributes: [
-                .font: UtkaChrome.font(11, weight: .medium),
-                .foregroundColor: color
-            ]
-        )
-        button.layer?.backgroundColor = (on ? IslandLook.accent.withAlphaComponent(0.22) : NSColor.clear).cgColor
-    }
-
-    /// Значок динамика по громкости и беззвучию.
-    private func speakerSymbol(volume: Float, muted: Bool, adjustable: Bool) -> String {
-        if !adjustable { return "speaker.wave.2" }
-        if muted || volume <= 0.001 { return "speaker.slash" }
-        if volume < 0.33 { return "speaker" }
-        if volume < 0.66 { return "speaker.wave.1" }
-        return "speaker.wave.2"
-    }
-
-    @objc private func sinkClicked(_ sender: NSButton) {
-        AudioOutput.shared.select(buttonTag: sender.tag)
+    @objc private func sourcesClicked() {
+        onToggleSources?()
     }
 
     /// Чернила поля и кнопок под текущий вид.
@@ -611,6 +588,120 @@ extension SoundStrip: NSSearchFieldDelegate {
     }
 }
 
+/// Список выходов под круглой кнопкой.
+final class SourceDrop: NSView {
+    var onPick: ((AudioOutput.Sink) -> Void)?
+    private var sinks: [AudioOutput.Sink] = []
+    private var current: UInt32 = 0
+    private var rows: [NSButton] = []
+
+    /// Высота списка. Пустой список всё равно занимает одну строку.
+    var neededHeight: CGFloat { CGFloat(max(sinks.count, 1)) * 32 + 8 }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isHidden = true
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.masksToBounds = true
+        layer?.backgroundColor = IslandLook.solid.cgColor
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        guard !isHidden else { return }
+        paint()
+    }
+
+    /// Показывает выходы или прячет список.
+    func show(open: Bool, sinks: [AudioOutput.Sink], current: UInt32) {
+        guard open else {
+            close()
+            return
+        }
+        let same = !isHidden && sinks == self.sinks && current == self.current
+        self.sinks = sinks
+        self.current = current
+        isHidden = false
+        if same { return }
+        rebuild()
+    }
+
+    func close() {
+        guard !isHidden || !rows.isEmpty else { return }
+        isHidden = true
+        sinks = []
+        rows.forEach { $0.removeFromSuperview() }
+        rows = []
+    }
+
+    /// Плотная плашка, чтобы имена читались и на стекле.
+    func retint() {
+        layer?.backgroundColor = IslandLook.solid.cgColor
+        paint()
+    }
+
+    private func rebuild() {
+        rows.forEach { $0.removeFromSuperview() }
+        if sinks.isEmpty {
+            rows = [makeRow(title: "Нет источников", symbol: "speaker.slash", index: -1)]
+        } else {
+            rows = sinks.enumerated().map { index, sink in
+                makeRow(title: sink.name, symbol: sink.symbol, index: index)
+            }
+        }
+        paint()
+    }
+
+    /// Строка выхода: значок транспорта и имя.
+    private func makeRow(title: String, symbol: String, index: Int) -> NSButton {
+        let button = NSButton()
+        button.isBordered = false
+        button.imagePosition = .imageLeading
+        button.imageScaling = .scaleProportionallyDown
+        button.imageHugsTitle = true
+        button.alignment = .left
+        button.lineBreakMode = .byTruncatingTail
+        button.font = UtkaChrome.font(12, weight: .medium)
+        button.title = title
+        button.tag = index
+        button.target = self
+        button.action = #selector(clicked(_:))
+        button.focusRingType = .none
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 6
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        addSubview(button)
+        return button
+    }
+
+    private func paint() {
+        let width = bounds.width
+        for (index, button) in rows.enumerated() {
+            let on = sinks.indices.contains(index) && sinks[index].id == current
+            let color = on ? IslandLook.accent : UtkaChrome.dim
+            button.frame = NSRect(x: 4, y: bounds.height - CGFloat(index + 1) * 32, width: max(40, width - 8), height: 30)
+            button.contentTintColor = color
+            button.attributedTitle = NSAttributedString(
+                string: button.title,
+                attributes: [
+                    .font: UtkaChrome.font(12, weight: on ? .semibold : .medium),
+                    .foregroundColor: color
+                ]
+            )
+            button.layer?.backgroundColor = (on ? IslandLook.accent.withAlphaComponent(0.22) : NSColor.clear).cgColor
+        }
+    }
+
+    @objc private func clicked(_ sender: NSButton) {
+        guard sinks.indices.contains(sender.tag) else { return }
+        onPick?(sinks[sender.tag])
+    }
+}
+
 /// Островок у верхнего края выбранного экрана.
 final class IslandPanel {
     let window: KeyPanel
@@ -622,6 +713,8 @@ final class IslandPanel {
     private let soundStrip = SoundStrip()
     private let spot = IslandSearch()
     private let searchDrop = SearchDrop()
+    private let sourceDrop = SourceDrop()
+    private var sourcesOpen = false
     private let shotButton = NSButton()
     private let shotTarget = ShotButtonTarget()
     private let body = NSView()
@@ -645,13 +738,16 @@ final class IslandPanel {
         root.needsLayout = true
         soundStrip.applyChrome()
         searchDrop.retint()
+        sourceDrop.retint()
         showSection(current)
     }
 
     /// Меняет полосу, кнопку снимка не двигает.
-    func setBar(_ mode: IslandBarMode) {
-        soundStrip.setMode(mode)
-        if mode != .search { searchDrop.show([]) }
+    func setBar() {
+        soundStrip.setBar(sound: IslandBar.sound, search: IslandBar.search)
+        if !IslandBar.search { searchDrop.show([]) }
+        if !IslandBar.sound { sourcesOpen = false }
+        refreshSources()
     }
 
     /// Список Spotlight под полем, не задевая кнопку снимка.
@@ -664,6 +760,38 @@ final class IslandPanel {
         let top = min(anchor.minY - 4, area.maxY)
         let fitted = min(searchDrop.neededHeight, max(32, top - area.minY))
         searchDrop.frame = NSRect(x: area.minX, y: top - fitted, width: area.width, height: fitted)
+    }
+
+    /// Список источников под круглой кнопкой, не шире тела островка.
+    private func placeSourceDrop() {
+        guard sourcesOpen, let anchor = soundStrip.sourcesFrame(in: root) else {
+            sourceDrop.isHidden = true
+            return
+        }
+        let area = body.frame
+        let width = min(240, area.width)
+        let top = min(anchor.minY - 4, area.maxY)
+        let fitted = min(sourceDrop.neededHeight, max(32, top - area.minY))
+        var x = anchor.minX
+        if x + width > area.maxX { x = max(area.minX, area.maxX - width) }
+        sourceDrop.isHidden = false
+        sourceDrop.frame = NSRect(x: x, y: top - fitted, width: width, height: fitted)
+    }
+
+    /// Открывает или закрывает список выходов.
+    private func toggleSources() {
+        guard IslandBar.sound else { return }
+        sourcesOpen.toggle()
+        refreshSources()
+    }
+
+    /// Перерисовывает список, если он открыт, и кружок на полосе.
+    private func refreshSources() {
+        let open = sourcesOpen && IslandBar.sound
+        sourcesOpen = open
+        sourceDrop.show(open: open, sinks: AudioOutput.shared.sinks, current: AudioOutput.shared.currentID)
+        soundStrip.setSourcesOpen(open)
+        placeSourceDrop()
     }
 
     init(shelf: NSView, clipboard: NSView, presets: NSView, translator: NSView, mark: NSImage?) {
@@ -734,6 +862,15 @@ final class IslandPanel {
         root.addSubview(topBar)
         root.addSubview(body)
         root.addSubview(searchDrop)
+        root.addSubview(sourceDrop)
+        sourceDrop.onPick = { [weak self] sink in
+            guard let self else { return }
+            self.sourcesOpen = false
+            AudioOutput.shared.select(sink.id)
+            self.refreshSources()
+        }
+        soundStrip.onToggleSources = { [weak self] in self?.toggleSources() }
+        soundStrip.onAudio = { [weak self] in self?.refreshSources() }
         spot.onHits = { [weak self] hits in
             self?.searchDrop.show(hits)
             self?.placeSearchDrop()
@@ -774,6 +911,7 @@ final class IslandPanel {
                 visible.resizeSubviews(withOldSize: visible.bounds.size)
             }
             self.placeSearchDrop()
+            self.placeSourceDrop()
         }
         NotificationCenter.default.post(name: NSView.frameDidChangeNotification, object: root)
         markView.onClick = { [weak self] in self?.onSettings?() }
@@ -809,6 +947,9 @@ final class IslandPanel {
     }
 
     func hide() {
+        sourcesOpen = false
+        sourceDrop.close()
+        soundStrip.setSourcesOpen(false)
         guard window.isVisible else { return }
         let frame = window.frame
         let top = (window.screen ?? NSScreen.main)?.frame.maxY ?? frame.maxY
@@ -818,6 +959,9 @@ final class IslandPanel {
 
     /// Сразу убрать окно, без выезда. Иначе жест снимка попадает в островок.
     func dismiss() {
+        sourcesOpen = false
+        sourceDrop.close()
+        soundStrip.setSourcesOpen(false)
         slideTimer?.invalidate()
         slideTimer = nil
         window.orderOut(nil)
