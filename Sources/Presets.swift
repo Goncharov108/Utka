@@ -124,39 +124,56 @@ final class PresetsModel {
     }
 }
 
-/// Заготовки: файлы сверху, фразы списком, внизу добавление текста.
+private enum PresetsTab: Int {
+    case notes, files
+}
+
+/// Заготовки: переключатель наверху разводит фразы и файлы по разным вкладкам,
+/// чтобы список заметок не делил место с полосой файлов.
 final class PresetsView: NSView {
     var onDrag: ((Bool) -> Void)?
     var copyText: (String) -> Void = { _ in }
 
     private let model: PresetsModel
+    private let tabControl = NSSegmentedControl()
     private let fileScroll = NSScrollView()
-    private let fileDocument = NSView()
+    private let fileDocument = FlippedView()
     private let textScroll = NSScrollView()
     private let textDocument = FlippedView()
-    private let emptyFiles = UtkaChrome.label("Перетащи файл", size: 12, color: UtkaChrome.dim)
+    private let emptyLabel = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
     private let errorLabel = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
     private let titleField = NSTextField()
     private let bodyField = NSTextField()
     private let addButton = NSButton()
     private var cards: [FileCardView] = []
     private var rows: [TextRowView] = []
+    private var expanded: Set<String> = []
+    private var tab: PresetsTab = .notes
 
     init(model: PresetsModel) {
         self.model = model
         super.init(frame: .zero)
         wantsLayer = true
+        tabControl.segmentStyle = .texturedRounded
+        tabControl.segmentCount = 2
+        tabControl.setLabel("Заметки", forSegment: PresetsTab.notes.rawValue)
+        tabControl.setLabel("Файлы", forSegment: PresetsTab.files.rawValue)
+        tabControl.selectedSegment = tab.rawValue
+        tabControl.target = self
+        tabControl.action = #selector(tabChanged)
+        let fileClip = FlippedClipView()
+        fileScroll.contentView = fileClip
         fileScroll.documentView = fileDocument
-        fileScroll.hasHorizontalScroller = true
+        fileScroll.hasVerticalScroller = true
         fileScroll.drawsBackground = false
         fileScroll.autohidesScrollers = true
-        let clip = FlippedClipView()
-        textScroll.contentView = clip
+        let textClip = FlippedClipView()
+        textScroll.contentView = textClip
         textScroll.documentView = textDocument
         textScroll.hasVerticalScroller = true
         textScroll.drawsBackground = false
         textScroll.autohidesScrollers = true
-        emptyFiles.alignment = .center
+        emptyLabel.alignment = .center
         styleField(titleField, placeholder: "Название")
         styleField(bodyField, placeholder: "Фраза, адрес или ссылка")
         addButton.title = ""
@@ -167,9 +184,10 @@ final class PresetsView: NSView {
         addButton.contentTintColor = .white
         addButton.target = self
         addButton.action = #selector(addText)
+        addSubview(tabControl)
         addSubview(fileScroll)
-        addSubview(emptyFiles)
         addSubview(textScroll)
+        addSubview(emptyLabel)
         addSubview(errorLabel)
         addSubview(titleField)
         addSubview(bodyField)
@@ -187,20 +205,58 @@ final class PresetsView: NSView {
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
         super.resizeSubviews(withOldSize: oldSize)
-        let fileH: CGFloat = 96
-        fileScroll.frame = NSRect(x: 0, y: bounds.height - fileH, width: bounds.width, height: fileH)
-        emptyFiles.frame = fileScroll.frame
-        let formY: CGFloat = 4
-        let formH: CGFloat = 26
-        let plus: CGFloat = 26
-        let titleW = min(140, max(72, (bounds.width - plus - 16) * 0.34))
-        titleField.frame = NSRect(x: 0, y: formY, width: titleW, height: formH)
-        bodyField.frame = NSRect(x: titleW + 8, y: formY, width: max(40, bounds.width - titleW - plus - 16), height: formH)
-        addButton.frame = NSRect(x: bounds.width - plus, y: formY, width: plus, height: formH)
-        errorLabel.frame = NSRect(x: 0, y: formY + formH + 2, width: bounds.width - plus - 8, height: 14)
-        let textY = formY + formH + 18
-        textScroll.frame = NSRect(x: 0, y: textY, width: bounds.width, height: max(24, bounds.height - fileH - textY - 6))
+        applyLayout()
+    }
+
+    private var focused: Bool { rows.contains { $0.isExpanded } }
+
+    /// Раскладка целиком зависит от вкладки и от того, раскрыта ли заметка.
+    private func applyLayout() {
+        let focus = focused
+        tabControl.isHidden = focus
+        let tabH: CGFloat = 24
+        let top = focus ? bounds.height : bounds.height - tabH - 6
+        tabControl.frame = NSRect(x: 0, y: bounds.height - tabH, width: 160, height: tabH)
+
+        let showFiles = tab == .files && !focus
+        let showNotes = tab == .notes && !focus
+        fileScroll.isHidden = !showFiles
+        textScroll.isHidden = !(showNotes || focus)
+        titleField.isHidden = !showNotes
+        bodyField.isHidden = !showNotes
+        addButton.isHidden = !showNotes
+        errorLabel.isHidden = !showNotes
+
+        if focus {
+            textScroll.frame = bounds
+        } else if tab == .files {
+            fileScroll.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(24, top))
+        } else {
+            let formY: CGFloat = 4
+            let formH: CGFloat = 26
+            let plus: CGFloat = 26
+            let titleW = min(140, max(72, (bounds.width - plus - 16) * 0.34))
+            titleField.frame = NSRect(x: 0, y: formY, width: titleW, height: formH)
+            bodyField.frame = NSRect(x: titleW + 8, y: formY, width: max(40, bounds.width - titleW - plus - 16), height: formH)
+            addButton.frame = NSRect(x: bounds.width - plus, y: formY, width: plus, height: formH)
+            errorLabel.frame = NSRect(x: 0, y: formY + formH + 2, width: bounds.width - plus - 8, height: 14)
+            let textY = formY + formH + 18
+            textScroll.frame = NSRect(x: 0, y: textY, width: bounds.width, height: max(24, top - textY))
+        }
+
+        let emptyIsForFiles = tab == .files
+        emptyLabel.stringValue = emptyIsForFiles ? "Пусто. Перетащи сюда файл" : "Пусто. Допиши фразу ниже"
+        emptyLabel.isHidden = focus || (emptyIsForFiles ? !cards.isEmpty : !rows.isEmpty)
+        emptyLabel.frame = emptyIsForFiles ? fileScroll.frame : (showNotes ? textScroll.frame : bounds)
+
+        rows.forEach { $0.isHidden = tab != .notes || (focus && !$0.isExpanded) }
+        cards.forEach { $0.isHidden = tab != .files }
+
         layoutContent()
+        if focus {
+            textScroll.contentView.scroll(to: .zero)
+            textScroll.reflectScrolledClipView(textScroll.contentView)
+        }
     }
 
     private func rebuild() {
@@ -220,34 +276,62 @@ final class PresetsView: NSView {
         }
         rows = model.texts.map { preset in
             let row = TextRowView()
-            row.show(title: preset.title, detail: oneLine(preset.body ?? ""))
+            row.isExpanded = expanded.contains(preset.id)
+            row.show(title: preset.title, detail: oneLine(preset.body ?? ""), body: preset.body ?? "")
             row.onClick = { [weak self] in
                 guard let body = preset.body else { return }
                 self?.copyText(body)
+            }
+            row.onCopySelection = { [weak self] piece in self?.copyText(piece) }
+            row.onSelecting = { [weak self] active in self?.onDrag?(active) }
+            row.onToggle = { [weak self, weak row] in
+                guard let self, let row else { return }
+                let open = !self.expanded.contains(preset.id)
+                self.expanded = open ? [preset.id] : []
+                self.rows.forEach { $0.isExpanded = false }
+                row.isExpanded = open
+                self.applyLayout()
             }
             row.onDelete = { [weak self] in self?.model.remove(id: preset.id) }
             textDocument.addSubview(row)
             return row
         }
-        emptyFiles.isHidden = !cards.isEmpty
         errorLabel.stringValue = model.loadError
-        layoutContent()
+        applyLayout()
     }
 
+    /// Карточки файлов переносятся по строкам сеткой, а не одной горизонтальной лентой.
     private func layoutContent() {
+        let cardW: CGFloat = 100
+        let cardH: CGFloat = 90
+        let gap: CGFloat = 12
+        let width = max(fileScroll.contentView.bounds.width, fileScroll.bounds.width)
+        let perRow = max(1, Int((width + gap) / (cardW + gap)))
         var x: CGFloat = 0
-        for card in cards {
-            card.frame = NSRect(x: x, y: 2, width: 100, height: 90)
-            x += 120
-        }
-        fileDocument.frame = NSRect(x: 0, y: 0, width: max(x, 1), height: 96)
-        let width = max(textScroll.contentView.bounds.width, textScroll.bounds.width)
         var y: CGFloat = 0
-        for row in rows {
-            row.frame = NSRect(x: 0, y: y, width: width, height: 48)
-            y += 54
+        var col = 0
+        for card in cards {
+            card.frame = NSRect(x: x, y: y, width: cardW, height: cardH)
+            col += 1
+            if col >= perRow {
+                col = 0
+                x = 0
+                y += cardH + gap
+            } else {
+                x += cardW + gap
+            }
         }
-        textDocument.frame = NSRect(x: 0, y: 0, width: width, height: max(y, textScroll.contentView.bounds.height))
+        let rowsUsed = cards.isEmpty ? 0 : (col == 0 ? y : y + cardH + gap)
+        fileDocument.frame = NSRect(x: 0, y: 0, width: width, height: max(rowsUsed, fileScroll.contentView.bounds.height))
+
+        let textWidth = max(textScroll.contentView.bounds.width, textScroll.bounds.width)
+        var ty: CGFloat = 0
+        for row in rows {
+            let height = row.isExpanded ? max(TextRowView.expandedHeight, textScroll.bounds.height) : TextRowView.collapsedHeight
+            row.frame = NSRect(x: 0, y: ty, width: textWidth, height: height)
+            ty += height + 6
+        }
+        textDocument.frame = NSRect(x: 0, y: 0, width: textWidth, height: max(ty, textScroll.contentView.bounds.height))
     }
 
     private func styleField(_ field: NSTextField, placeholder: String) {
@@ -258,6 +342,12 @@ final class PresetsView: NSView {
         field.isBordered = false
         field.focusRingType = .none
         field.bezelStyle = .roundedBezel
+    }
+
+    @objc private func tabChanged() {
+        guard let value = PresetsTab(rawValue: tabControl.selectedSegment) else { return }
+        tab = value
+        applyLayout()
     }
 
     @objc private func addText() {
@@ -279,6 +369,9 @@ final class PresetsView: NSView {
         ) as? [URL] ?? []
         guard !urls.isEmpty else { return false }
         model.addFiles(urls)
+        tab = .files
+        tabControl.selectedSegment = tab.rawValue
+        applyLayout()
         return true
     }
 }

@@ -213,13 +213,45 @@ final class FileCardView: NSView, NSDraggingSource {
     }
 }
 
-/// Строка текста: клик копирует, крестик убирает запись.
+/// Текст заметки: выделение мышью держит островок открытым, пока кнопка зажата.
+final class SelectableTextView: NSTextView {
+    var onSelecting: ((Bool) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        onSelecting?(true)
+        super.mouseDown(with: event)
+        onSelecting?(false)
+    }
+}
+
+/// Строка текста: клик по строке или иконка копирует всё, шеврон раскрывает текст для частичного копирования.
 final class TextRowView: NSView {
+    static let collapsedHeight: CGFloat = 48
+    static let expandedHeight: CGFloat = 172
+
     var onClick: (() -> Void)?
     var onDelete: (() -> Void)?
+    var onToggle: (() -> Void)?
+    var onCopySelection: ((String) -> Void)?
+    var onSelecting: ((Bool) -> Void)? {
+        didSet { textView.onSelecting = onSelecting }
+    }
+    var isExpanded = false {
+        didSet {
+            guard isExpanded != oldValue else { return }
+            updateExpanded()
+        }
+    }
+
     private let titleLabel = UtkaChrome.label("", size: 13, weight: .semibold)
     private let detailLabel = UtkaChrome.label("", size: 11, color: UtkaChrome.dim)
     private let deleteButton = NSButton()
+    private let copyButton = NSButton()
+    private let expandButton = NSButton()
+    private let selectionButton = NSButton()
+    private let collapseButton = NSButton()
+    private let textScroll = NSScrollView()
+    private let textView = SelectableTextView()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -232,28 +264,99 @@ final class TextRowView: NSView {
         deleteButton.contentTintColor = UtkaChrome.dim
         deleteButton.target = self
         deleteButton.action = #selector(deleteTapped)
+        styleIcon(copyButton, symbol: "doc.on.doc", tip: "Копировать всё", action: #selector(copyTapped))
+        styleIcon(expandButton, symbol: "chevron.down", tip: "Раскрыть", action: #selector(toggleTapped))
+        selectionButton.title = "Копировать выделенное"
+        selectionButton.bezelStyle = .rounded
+        selectionButton.controlSize = .small
+        selectionButton.target = self
+        selectionButton.action = #selector(copySelectionTapped)
+        collapseButton.title = "Свернуть"
+        collapseButton.image = NSImage(systemSymbolName: "chevron.up", accessibilityDescription: "Свернуть")
+        collapseButton.imagePosition = .imageLeading
+        collapseButton.bezelStyle = .rounded
+        collapseButton.controlSize = .small
+        collapseButton.target = self
+        collapseButton.action = #selector(toggleTapped)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.font = UtkaChrome.font(12)
+        textView.textColor = .white
+        textView.insertionPointColor = .white
+        textView.selectedTextAttributes = [.backgroundColor: NSColor.white.withAlphaComponent(0.28)]
+        textView.textContainerInset = NSSize(width: 2, height: 4)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textScroll.documentView = textView
+        textScroll.hasVerticalScroller = true
+        textScroll.drawsBackground = false
+        textScroll.autohidesScrollers = true
         addSubview(titleLabel)
         addSubview(detailLabel)
+        addSubview(copyButton)
+        addSubview(expandButton)
         addSubview(deleteButton)
+        addSubview(textScroll)
+        addSubview(selectionButton)
+        addSubview(collapseButton)
+        updateExpanded()
     }
 
     required init?(coder: NSCoder) { nil }
 
-    func show(title: String, detail: String) {
+    func show(title: String, detail: String, body: String = "") {
         titleLabel.stringValue = title
         detailLabel.stringValue = detail
-        detailLabel.isHidden = detail.isEmpty || detail == title
+        detailLabel.isHidden = isExpanded || detail.isEmpty || detail == title
+        textView.string = body
+    }
+
+    private func styleIcon(_ button: NSButton, symbol: String, tip: String, action: Selector) {
+        button.title = ""
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        button.imagePosition = .imageOnly
+        button.isBordered = false
+        button.contentTintColor = UtkaChrome.dim
+        button.toolTip = tip
+        button.target = self
+        button.action = action
+    }
+
+    private func updateExpanded() {
+        let symbol = isExpanded ? "chevron.up" : "chevron.down"
+        expandButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        expandButton.toolTip = isExpanded ? "Свернуть" : "Раскрыть"
+        textScroll.isHidden = !isExpanded
+        selectionButton.isHidden = !isExpanded
+        collapseButton.isHidden = !isExpanded
+        expandButton.contentTintColor = isExpanded ? .white : UtkaChrome.dim
+        detailLabel.isHidden = isExpanded || detailLabel.stringValue.isEmpty || detailLabel.stringValue == titleLabel.stringValue
+        needsLayout = true
     }
 
     override func layout() {
         super.layout()
-        deleteButton.frame = NSRect(x: bounds.width - 28, y: (bounds.height - 18) / 2, width: 22, height: 18)
-        let textW = bounds.width - 44
-        if detailLabel.isHidden {
-            titleLabel.frame = NSRect(x: 10, y: (bounds.height - 18) / 2, width: textW, height: 18)
+        let head = TextRowView.collapsedHeight
+        let top = bounds.height - head
+        deleteButton.frame = NSRect(x: bounds.width - 28, y: top + (head - 18) / 2, width: 22, height: 18)
+        expandButton.frame = NSRect(x: bounds.width - 54, y: top + (head - 18) / 2, width: 22, height: 18)
+        copyButton.frame = NSRect(x: bounds.width - 80, y: top + (head - 18) / 2, width: 22, height: 18)
+        let textW = bounds.width - 96
+        if isExpanded || detailLabel.isHidden {
+            titleLabel.frame = NSRect(x: 10, y: top + (head - 18) / 2, width: textW, height: 18)
         } else {
-            titleLabel.frame = NSRect(x: 10, y: bounds.height - 24, width: textW, height: 16)
-            detailLabel.frame = NSRect(x: 10, y: 6, width: textW, height: 14)
+            titleLabel.frame = NSRect(x: 10, y: top + head - 24, width: textW, height: 16)
+            detailLabel.frame = NSRect(x: 10, y: top + 6, width: textW, height: 14)
+        }
+        if isExpanded {
+            selectionButton.frame = NSRect(x: 10, y: 6, width: 150, height: 22)
+            collapseButton.frame = NSRect(x: bounds.width - 100, y: 6, width: 90, height: 22)
+            textScroll.frame = NSRect(x: 8, y: 34, width: bounds.width - 16, height: max(20, top - 38))
         }
     }
 
@@ -261,7 +364,8 @@ final class TextRowView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        guard bounds.contains(point), !deleteButton.frame.contains(point) else { return }
+        guard bounds.contains(point), point.y >= bounds.height - TextRowView.collapsedHeight else { return }
+        guard ![deleteButton, copyButton, expandButton].contains(where: { $0.frame.contains(point) }) else { return }
         flash()
         onClick?()
     }
@@ -271,6 +375,23 @@ final class TextRowView: NSView {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             self?.layer?.backgroundColor = UtkaChrome.card.cgColor
         }
+    }
+
+    @objc private func copyTapped() {
+        flash()
+        onClick?()
+    }
+
+    @objc private func toggleTapped() {
+        onToggle?()
+    }
+
+    @objc private func copySelectionTapped() {
+        let range = textView.selectedRange()
+        let text = textView.string as NSString
+        let piece = range.length > 0 ? text.substring(with: range) : text as String
+        flash()
+        onCopySelection?(piece)
     }
 
     @objc private func deleteTapped() {
