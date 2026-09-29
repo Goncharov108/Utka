@@ -9,7 +9,7 @@ struct IslandHit {
     var copy: String?
 }
 
-/// Поиск как у Spotlight: индекс Мака, программы, счёт, словарь и сеть.
+/// Поиск: программы с диска сразу, индекс Мака по мере нахождения, запасной обход трёх папок.
 /// Command+пробел системы не занимает.
 final class IslandSearch: NSObject {
     var onHits: (([IslandHit]) -> Void)?
@@ -18,8 +18,15 @@ final class IslandSearch: NSObject {
     private let queryQueue = OperationQueue()
     private var ticket = 0
     private var queryTicket = 0
+    private var queryText = ""
     private var pinned: [IslandHit] = []
+    private var catalogHits: [IslandHit] = []
+    private var nearbyHits: [IslandHit] = []
+    private var indexHits: [IslandHit] = []
+    private var apps: [(name: String, path: String)] = []
     private var wait: DispatchWorkItem?
+    private var deepWalk: DispatchWorkItem?
+    private var lastIndexPublish = Date.distantPast
 
     override init() {
         super.init()
@@ -27,7 +34,7 @@ final class IslandSearch: NSObject {
         queryQueue.qualityOfService = .userInitiated
         query.searchScopes = [NSMetadataQueryLocalComputerScope]
         query.operationQueue = queryQueue
-        query.notificationBatchingInterval = 0.15
+        query.notificationBatchingInterval = 0.2
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(queryFinished),
@@ -40,6 +47,16 @@ final class IslandSearch: NSObject {
             name: .NSMetadataQueryGatheringProgress,
             object: query
         )
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let loaded = IslandSearch.readApps()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.apps = loaded
+                guard !self.queryText.isEmpty else { return }
+                self.catalogHits = self.matchedApps(self.queryText)
+                self.publish()
+            }
+        }
     }
 
     /// Счёт и единицы без диска. Нужен самопроверке.
@@ -49,54 +66,112 @@ final class IslandSearch: NSObject {
         return immediateHits(trimmed)
     }
 
-    /// Пустая строка гасит список. Счёт сразу, индекс — после короткой паузы.
+    /// Пустая строка гасит список. Программы сразу, индекс и папки — следом.
     func lookup(_ text: String) {
         ticket += 1
         let current = ticket
         wait?.cancel()
+        deepWalk?.cancel()
         query.stop()
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        queryText = trimmed
+        catalogHits = []
+        nearbyHits = []
+        indexHits = []
+        lastIndexPublish = .distantPast
         guard !trimmed.isEmpty else {
             pinned = []
             onHits?([])
             return
         }
-        pinned = immediateHits(trimmed)
-        onHits?(pinned + [webHit(trimmed)])
+        pinned = immediateHits(trimmed) + [webHit(trimmed)]
+        catalogHits = matchedApps(trimmed)
+        publish()
         guard trimmed.count >= 2 else { return }
+        let roots = IslandSearch.homeRoots()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let hits = IslandSearch.names(in: roots, query: trimmed, maxDepth: 0)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.ticket == current else { return }
+                self.nearbyHits = hits
+                self.publish()
+            }
+        }
+        let deep = DispatchWorkItem { [weak self] in
+            let hits = IslandSearch.names(in: roots, query: trimmed, maxDepth: 3)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.ticket == current else { return }
+                self.nearbyHits = hits
+                self.publish()
+            }
+        }
+        deepWalk = deep
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.18, execute: deep)
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.ticket == current else { return }
             self.queryTicket = current
-            self.query.predicate = NSPredicate(format: "kMDItemDisplayName LIKE[cd] %@", "*\(trimmed)*")
+            let safe = trimmed.replacingOccurrences(of: "*", with: "").replacingOccurrences(of: "?", with: "")
+            self.query.predicate = NSPredicate(format: "kMDItemDisplayName LIKE[cd] %@", "*\(safe)*")
             self.query.start()
         }
         wait = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: item)
+    }
+
+    /// Собирает уже известные строки и отдаёт их списку.
+    private func publish() {
+        let found = IslandSearch.deduped(catalogHits + nearbyHits + indexHits)
+        onHits?(IslandSearch.ordered(pinned, found, query: queryText))
+    }
+
+    /// Программы из памяти. Список диска к этому моменту уже читается отдельно.
+    private func matchedApps(_ text: String) -> [IslandHit] {
+        IslandSearch.appHits(query: text, apps: apps, recent: IslandSearch.recentApps())
     }
 
     @objc private func queryFinished() {
+        let gathering = query.isGathering
         guard query.resultCount > 0 else { return }
-        if query.resultCount < 24, query.isGathering { return }
+        if gathering, Date().timeIntervalSince(lastIndexPublish) < 0.18 { return }
         let mine = queryTicket
         query.disableUpdates()
-        let found = (query.results as? [NSMetadataItem] ?? []).prefix(24).compactMap(hit(from:))
-        query.stop()
-        let apps = found.filter { $0.detail == "Программа" }
-        let files = found.filter { $0.detail != "Программа" }
+        let found = (query.results as? [NSMetadataItem] ?? []).prefix(40).compactMap(hit(from:))
+        if gathering {
+            query.enableUpdates()
+        } else {
+            query.stop()
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self, self.ticket == mine else { return }
-            self.onHits?(IslandSearch.ordered(self.pinned, apps + files))
+            self.lastIndexPublish = Date()
+            self.indexHits = found
+            self.publish()
         }
     }
 
-    /// Счёт сверху, программа выше словаря, сеть внизу. Чеки установщика не попадают в список.
-    static func ordered(_ pinned: [IslandHit], _ found: [IslandHit]) -> [IslandHit] {
+    /// Точное имя, потом префикс, потом содержание. Словарь и сеть ниже.
+    static func ordered(_ pinned: [IslandHit], _ found: [IslandHit], query: String = "") -> [IslandHit] {
         let math = pinned.filter { $0.detail == "Калькулятор" || $0.detail == "Перевод единиц" }
-        let apps = found.filter { $0.detail == "Программа" }
         let dict = pinned.filter { $0.detail == "Словарь" }
-        let files = found.filter { $0.detail == "Файл" }
         let web = pinned.filter { $0.detail == "Сеть" }
-        return Array((math + apps + dict + files + web).prefix(8))
+        let rows = deduped(found)
+        let exact = rows.filter { rank(of: $0.title, query: query) == 3 }
+        let prefix = rows.filter { rank(of: $0.title, query: query) == 2 }
+        let contains = rows.filter { rank(of: $0.title, query: query) == 1 }
+        let fuzzyApps = rows.filter { $0.detail == "Программа" && rank(of: $0.title, query: query) == 0 }
+        let rest = rows.filter { $0.detail != "Программа" && rank(of: $0.title, query: query) == 0 }
+        return Array(deduped(math + exact + prefix + contains + fuzzyApps + dict + rest + web).prefix(8))
+    }
+
+    /// 3 — имя целиком, 2 — с начала, 1 — внутри, 0 — неточное или пустой запрос.
+    static func rank(of title: String, query: String) -> Int {
+        let name = folded(title)
+        let needle = folded(query)
+        guard !needle.isEmpty else { return 0 }
+        if name == needle { return 3 }
+        if name.hasPrefix(needle) { return 2 }
+        if name.contains(needle) { return 1 }
+        return 0
     }
 
     /// Индекс Spotlight хранит чеки пакетов. В списке они только мешают.
@@ -105,6 +180,174 @@ final class IslandSearch: NSObject {
         if lower.contains("/receipts/") { return false }
         if lower.hasSuffix(".bom") { return false }
         return true
+    }
+
+    /// Одна и та же дорожка не занимает две строки.
+    static func deduped(_ hits: [IslandHit]) -> [IslandHit] {
+        var seen = Set<String>()
+        var out: [IslandHit] = []
+        for hit in hits {
+            let key = hit.url?.path ?? "\(hit.detail)|\(hit.title)"
+            if seen.insert(key).inserted { out.append(hit) }
+        }
+        return out
+    }
+
+    /// Неточный набор: «cht» подходит к ChatGPT, если буквы идут подряд и близко.
+    static func score(name: String, query: String) -> Int? {
+        let foldedName = folded(name)
+        let foldedQuery = folded(query)
+        guard !foldedQuery.isEmpty else { return nil }
+        if foldedName == foldedQuery { return 1000 }
+        if foldedName.hasPrefix(foldedQuery) { return 800 }
+        if foldedName.contains(foldedQuery) { return 500 }
+        guard foldedQuery.count >= 3 else { return nil }
+        var index = foldedName.startIndex
+        var first: String.Index?
+        var last: String.Index?
+        var run = 0
+        var bestRun = 0
+        var previous: String.Index?
+        for character in foldedQuery {
+            guard let found = foldedName[index...].firstIndex(of: character) else { return nil }
+            if first == nil { first = found }
+            last = found
+            if let previous, foldedName.distance(from: previous, to: found) == 1 {
+                run += 1
+                bestRun = max(bestRun, run)
+            } else {
+                run = 1
+            }
+            previous = found
+            index = foldedName.index(after: found)
+        }
+        guard let first, let last else { return nil }
+        let span = foldedName.distance(from: first, to: last) + 1
+        guard span <= foldedQuery.count + 2 else { return nil }
+        return 200 + bestRun * 10
+    }
+
+    /// Программы по очкам. Недавние чуть выше, но не обгоняют точное имя.
+    static func appHits(query: String, apps: [(name: String, path: String)], recent: [String: Double]) -> [IslandHit] {
+        let now = Date().timeIntervalSince1970
+        let ranked = apps.compactMap { app -> (Int, String, String)? in
+            guard var points = score(name: app.name, query: query) else { return nil }
+            if let used = recent[app.path] {
+                let age = now - used
+                if age < 86_400 { points += 80 }
+                else if age < 30 * 86_400 { points += 40 }
+            }
+            return (points, app.name, app.path)
+        }.sorted { $0.0 > $1.0 }
+        return ranked.prefix(5).map {
+            IslandHit(title: $0.1, detail: "Программа", url: URL(fileURLWithPath: $0.2), copy: nil)
+        }
+    }
+
+    /// Документы, стол и загрузки. Туда не входит весь диск.
+    static func homeRoots() -> [URL] {
+        let manager = FileManager.default
+        return [
+            manager.urls(for: .documentDirectory, in: .userDomainMask).first,
+            manager.urls(for: .desktopDirectory, in: .userDomainMask).first,
+            manager.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        ].compactMap { $0 }
+    }
+
+    /// Имена в заданных папках. Сначала верхний уровень, глубже — с коротким пределом по времени.
+    static func names(in roots: [URL], query: String, limit: Int = 12, maxDepth: Int = 3) -> [IslandHit] {
+        let needle = folded(query)
+        guard needle.count >= 2 else { return [] }
+        let skip: Set<String> = ["node_modules", ".git", "library", "deriveddata", "build", ".build", "pods", ".cursor"]
+        let deadline = Date().addingTimeInterval(maxDepth == 0 ? 0.15 : 0.4)
+        var hits: [IslandHit] = []
+        var visits = 0
+        var pending: [(URL, Int)] = roots.map { ($0, 0) }
+        var index = 0
+        while index < pending.count {
+            if hits.count >= limit || visits > 2500 || Date() > deadline { break }
+            let (directory, depth) = pending[index]
+            index += 1
+            guard let items = try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for url in items {
+                if hits.count >= limit || visits > 2500 || Date() > deadline { break }
+                visits += 1
+                let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
+                let directoryItem = values?.isDirectory == true
+                let base = url.pathExtension == "app" ? url.deletingPathExtension().lastPathComponent : url.lastPathComponent
+                if folded(base).contains(needle), acceptsPath(url.path) {
+                    let detail = url.pathExtension == "app" ? "Программа" : (directoryItem ? "Папка" : "Файл")
+                    hits.append(IslandHit(title: base, detail: detail, url: url, copy: nil))
+                }
+                if directoryItem, url.pathExtension != "app", depth < maxDepth, !skip.contains(url.lastPathComponent.lowercased()) {
+                    pending.append((url, depth + 1))
+                }
+            }
+        }
+        return hits.sorted { rank(of: $0.title, query: query) > rank(of: $1.title, query: query) }
+    }
+
+    /// Папки с программами. Пакет не раскрываем.
+    static func readApps() -> [(name: String, path: String)] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let roots = [
+            URL(fileURLWithPath: "/Applications", isDirectory: true),
+            URL(fileURLWithPath: "/System/Applications", isDirectory: true),
+            URL(fileURLWithPath: "/System/Applications/Utilities", isDirectory: true),
+            home.appendingPathComponent("Applications", isDirectory: true)
+        ]
+        var found: [(name: String, path: String)] = []
+        var seen = Set<String>()
+        func collect(_ directory: URL, depth: Int) {
+            guard depth < 3 else { return }
+            guard let items = try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: []
+            ) else { return }
+            for url in items where !url.lastPathComponent.hasPrefix(".") {
+                if url.pathExtension == "app" {
+                    guard seen.insert(url.path).inserted else { continue }
+                    found.append((appName(url), url.path))
+                    continue
+                }
+                let directoryItem = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                if directoryItem { collect(url, depth: depth + 1) }
+            }
+        }
+        for root in roots { collect(root, depth: 0) }
+        return found
+    }
+
+    /// Имя с диска. Чтение пакета на каждую программу тормозит первый запрос.
+    private static func appName(_ url: URL) -> String {
+        let name = url.deletingPathExtension().lastPathComponent
+        return name.isEmpty ? url.lastPathComponent : name
+    }
+
+    private static func folded(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+
+    private static let recentKey = "islandAppUse"
+
+    private static func recentApps() -> [String: Double] {
+        UserDefaults.standard.dictionary(forKey: recentKey) as? [String: Double] ?? [:]
+    }
+
+    /// Запоминает программу, чтобы в следующий раз она была выше.
+    private static func rememberApp(_ path: String) {
+        var store = recentApps()
+        store[path] = Date().timeIntervalSince1970
+        if store.count > 40 {
+            let keep = store.sorted { $0.value > $1.value }.prefix(40)
+            store = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
+        }
+        UserDefaults.standard.set(store, forKey: recentKey)
     }
 
     /// Счёт, перевод единиц и определение — без индекса.
@@ -134,7 +377,10 @@ final class IslandSearch: NSObject {
               IslandSearch.acceptsPath(path) else { return nil }
         let tree = item.value(forAttribute: NSMetadataItemContentTypeTreeKey) as? [String] ?? []
         let app = tree.contains("public.application") || path.hasSuffix(".app")
-        return IslandHit(title: name, detail: app ? "Программа" : "Файл", url: URL(fileURLWithPath: path), copy: nil)
+        var directory: ObjCBool = false
+        FileManager.default.fileExists(atPath: path, isDirectory: &directory)
+        let detail = app ? "Программа" : (directory.boolValue ? "Папка" : "Файл")
+        return IslandHit(title: name, detail: detail, url: URL(fileURLWithPath: path), copy: nil)
     }
 
     /// Открывает файл или копирует готовый ответ.
@@ -145,6 +391,7 @@ final class IslandSearch: NSObject {
         }
         guard let url = hit.url else { return }
         if url.pathExtension == "app" {
+            rememberApp(url.path)
             let config = NSWorkspace.OpenConfiguration()
             config.activates = true
             NSWorkspace.shared.openApplication(at: url, configuration: config)
@@ -232,8 +479,10 @@ final class SearchDrop: NSView {
     var neededHeight: CGFloat { hits.isEmpty ? 0 : CGFloat(hits.count) * 32 + 8 }
 
     func show(_ hits: [IslandHit]) {
-        self.hits = Array(hits.prefix(8))
-        picked = 0
+        let next = Array(hits.prefix(8))
+        let keep = !next.isEmpty && next.first?.title == self.hits.first?.title
+        self.hits = next
+        if !keep { picked = 0 }
         isHidden = self.hits.isEmpty
         rebuild()
     }

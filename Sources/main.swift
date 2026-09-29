@@ -311,6 +311,38 @@ enum SelfCheck {
         }
         if IslandSearch.acceptsPath("/Library/Receipts/com.apple.pkg.Safari.bom") { fail("чек в списке") }
         if !IslandSearch.acceptsPath("/Applications/Safari.app") { fail("программа отсечена") }
+        if IslandSearch.score(name: "ChatGPT", query: "cht") == nil { fail("неточный набор") }
+        if IslandSearch.score(name: "Notes", query: "cht") != nil { fail("ложное совпадение") }
+        let folderRank = IslandSearch.ordered(
+            [IslandHit(title: "сеть", detail: "Сеть", url: nil, copy: nil)],
+            [
+                IslandHit(title: "заметки goncharov", detail: "Файл", url: nil, copy: nil),
+                IslandHit(title: "Goncharov", detail: "Папка", url: URL(fileURLWithPath: "/tmp/Goncharov"), copy: nil)
+            ],
+            query: "goncharov"
+        )
+        if folderRank.map(\.title) != ["Goncharov", "заметки goncharov", "сеть"] {
+            fail("папка \(folderRank.map(\.title))")
+        }
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("utka-spot-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: scratch.appendingPathComponent("Goncharov"), withIntermediateDirectories: true)
+        let walked = IslandSearch.names(in: [scratch], query: "goncharov")
+        if !walked.contains(where: { $0.title == "Goncharov" && $0.detail == "Папка" }) {
+            fail("обход \(walked.map(\.title))")
+        }
+        try? FileManager.default.removeItem(at: scratch)
+        let apps = IslandSearch.readApps()
+        if !apps.contains(where: { $0.path.hasSuffix("/Safari.app") }) {
+            fail("нет Safari среди программ \(apps.count)")
+        }
+        let safari = IslandSearch.appHits(query: "saf", apps: apps, recent: [:])
+        if safari.first?.title != "Safari" { fail("saf \(safari.map(\.title))") }
+        let fuzzy = IslandSearch.appHits(
+            query: "cht",
+            apps: [("ChatGPT", "/Applications/ChatGPT.app")],
+            recent: [:]
+        )
+        if fuzzy.first?.title != "ChatGPT" { fail("cht \(fuzzy.map(\.title))") }
         var last: [String] = ["x"]
         search.onHits = { hits in last = hits.map(\.title) }
         search.lookup("2+2")
