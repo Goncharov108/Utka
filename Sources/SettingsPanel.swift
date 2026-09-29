@@ -13,7 +13,6 @@ final class SettingsPanel: NSObject {
     private let russianState = UtkaChrome.label("", size: 13, color: UtkaChrome.dim)
     private let languageButton = NSButton()
     private let languageNote = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
-    private let languageSettings = NSButton()
     private let updateTitle = UtkaChrome.label("Обновления", size: 13, weight: .semibold)
     private let updateButton = NSButton()
     private let updateLine = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
@@ -55,7 +54,6 @@ final class SettingsPanel: NSObject {
         languageNote.lineBreakMode = .byWordWrapping
         languageNote.cell?.wraps = true
         mount(languageButton, title: "Скачать английский и русский", action: #selector(downloadLanguages))
-        mount(languageSettings, title: "Открыть настройки языка", action: #selector(openLanguages))
         updateLine.maximumNumberOfLines = 8
         updateLine.lineBreakMode = .byWordWrapping
         updateLine.cell?.wraps = true
@@ -70,7 +68,6 @@ final class SettingsPanel: NSObject {
         body.addSubview(russianState)
         body.addSubview(languageButton)
         body.addSubview(languageNote)
-        body.addSubview(languageSettings)
         refreshLanguages()
         body.addSubview(updateTitle)
         body.addSubview(updateButton)
@@ -105,7 +102,6 @@ final class SettingsPanel: NSObject {
         if !missing {
             languageNote.stringValue = ""
         }
-        languageSettings.isHidden = languageNote.stringValue.isEmpty || languageNote.stringValue == "Качаю…"
         body.needsLayout = true
     }
 
@@ -115,11 +111,12 @@ final class SettingsPanel: NSObject {
         label.textColor = ready ? UtkaChrome.ink : UtkaChrome.dim
     }
 
+    /// Сначала пробует скачать сама, тихо. Если не вышло — сама же открывает
+    /// нужную страницу настроек, без второй кнопки и лишнего клика.
     @objc private func downloadLanguages() {
         guard !downloading else { return }
         downloading = true
         languageNote.stringValue = "Качаю…"
-        languageSettings.isHidden = true
         refreshLanguages()
         LanguagePacks.download { [weak self] error in
             guard let self else { return }
@@ -128,17 +125,12 @@ final class SettingsPanel: NSObject {
             let ready = LanguagePacks.items().allSatisfy(\.ready)
             if ready {
                 self.languageNote.stringValue = ""
-                self.languageSettings.isHidden = true
                 return
             }
-            self.languageNote.stringValue = error ?? "На диске пакета нет"
-            self.languageSettings.isHidden = false
+            self.languageNote.stringValue = "Открываю настройки языка — довершите загрузку там"
             self.body.needsLayout = true
+            ShortcutTranslate.openLanguageSettings()
         }
-    }
-
-    @objc private func openLanguages() {
-        ShortcutTranslate.openLanguageSettings()
     }
 
     /// Сверяет сборку с общим main и показывает, что именно готово.
@@ -236,10 +228,6 @@ final class SettingsPanel: NSObject {
         }
         if !languageNote.stringValue.isEmpty {
             languageNote.frame = NSRect(x: text.minX, y: y, width: text.width, height: 32)
-            y += 36
-        }
-        if !languageSettings.isHidden {
-            languageSettings.frame = NSRect(x: text.minX, y: y, width: languageSettings.frame.width + 8, height: 28)
             y += 36
         }
         y += 8
