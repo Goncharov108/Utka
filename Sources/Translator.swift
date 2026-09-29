@@ -63,6 +63,100 @@ private final class TranslateBox {
     var error: String?
 }
 
+/// Английский и русский в ~/Library/Translation. «Скачан» только если файл на диске не пустой.
+enum LanguagePacks {
+    struct Item {
+        var title: String
+        var ready: Bool
+    }
+
+    private static let minimumBytes = 100_000
+    private static var pending: AnyObject?
+    private static var pendingDone: AnyObject?
+
+    /// Две строки для окна настроек.
+    static func items() -> [Item] {
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Translation/AssetsV3", isDirectory: true)
+        return [
+            Item(title: "Английский", ready: containsPack(in: root, marks: ["en_us", "pb-en", "mt-en"])),
+            Item(title: "Русский", ready: containsPack(in: root, marks: ["ru_ru", "pb-ru", "-ru.asset"]))
+        ]
+    }
+
+    /// Качает модель en↔ru. nil значит вызов кончился без ошибки; подпись всё равно сверяется по диску.
+    static func download(completion: @escaping (String?) -> Void) {
+        guard dlopen("/System/Library/Frameworks/Translation.framework/Versions/A/Translation", RTLD_NOW) != nil,
+              let raw = dlsym(dlopen(nil, RTLD_NOW), "objc_msgSend"),
+              let cls = objc_getClass("_LTLocalePair") as AnyObject?,
+              let translator = objc_getClass("_LTTranslator") as AnyObject? else {
+            completion("Нет системного перевода")
+            return
+        }
+        typealias Getter = @convention(c) (AnyObject, Selector) -> AnyObject?
+        typealias Maker = @convention(c) (AnyObject, Selector, AnyObject?, AnyObject?) -> AnyObject?
+        typealias Fetch = @convention(c) (AnyObject, Selector, AnyObject?, Int8, AnyObject?) -> Void
+        let getter = unsafeBitCast(raw, to: Getter.self)
+        let maker = unsafeBitCast(raw, to: Maker.self)
+        let fetch = unsafeBitCast(raw, to: Fetch.self)
+        guard let pair = maker(
+            getter(cls, sel_registerName("alloc"))!,
+            sel_registerName("initWithSourceLocale:targetLocale:"),
+            NSLocale(localeIdentifier: "en_US"),
+            NSLocale(localeIdentifier: "ru_RU")
+        ) else {
+            completion("Не удалось начать загрузку")
+            return
+        }
+        pending = pair
+        let done: @convention(block) (AnyObject?) -> Void = { error in
+            pending = nil
+            pendingDone = nil
+            let message = (error as? NSError)?.localizedDescription
+            DispatchQueue.main.async {
+                completion(message?.isEmpty == false ? message : (error == nil ? nil : "Не удалось скачать"))
+            }
+        }
+        let boxed = unsafeBitCast(done, to: AnyObject.self)
+        pendingDone = boxed
+        fetch(
+            translator,
+            sel_registerName("_downloadAssetForLanguagePair:userInitiated:completion:"),
+            pair,
+            1,
+            boxed
+        )
+    }
+
+    /// Есть непустой файл, в пути которого виден этот язык.
+    private static func containsPack(in root: URL, marks: [String]) -> Bool {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        ) else { return false }
+        for case let url as URL in enumerator {
+            let path = url.path.lowercased()
+            guard marks.contains(where: { path.contains($0) }) else { continue }
+            if packFileIsReal(url) { return true }
+        }
+        return false
+    }
+
+    /// Обычный файл тяжелее 100 КБ или ссылка на такой файл.
+    private static func packFileIsReal(_ url: URL) -> Bool {
+        if fileIsHeavy(url) { return true }
+        let resolved = url.resolvingSymlinksInPath()
+        guard resolved.path != url.path else { return false }
+        return fileIsHeavy(resolved)
+    }
+
+    private static func fileIsHeavy(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+        return values?.isRegularFile == true && (values?.fileSize ?? 0) >= minimumBytes
+    }
+}
+
 /// Запасной путь через «Команды», если системная модель недоступна.
 enum ShortcutTranslate {
     static func translate(_ text: String, toEnglish: Bool) -> Result<String, TranslateFailure> {

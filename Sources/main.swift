@@ -104,20 +104,18 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setEnabled(!hover.enabled)
     }
 
-    /// Включает жест из меню и из окна настроек одним путём.
+    /// Включает жест из меню строки.
     private func setEnabled(_ on: Bool) {
         hover.enabled = on
         UserDefaults.standard.set(on, forKey: "enabled")
         toggleItem.state = on ? .on : .off
         statusItem.button?.appearsDisabled = !on
-        settings.setGesture(on)
         if !on { panel.hide() }
     }
 
     /// Окно настроек на том экране, где открыт островок.
     private func showSettings() {
-        settings.onGesture = { [weak self] on in self?.setEnabled(on) }
-        settings.show(on: panel.window.screen, gestureEnabled: hover.enabled)
+        settings.show(on: panel.window.screen)
     }
 
     /// Если доступ уже выдали живому процессу — сразу открыть крестик.
