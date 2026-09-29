@@ -12,11 +12,14 @@ final class SettingsPanel: NSObject {
     private let nativeNote = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
     private var nativeDownloading = false
     private let updateTitle = UtkaChrome.label("Обновления", size: 13, weight: .semibold)
+    private let versionLabel = UtkaChrome.label("", size: 13)
     private let updateButton = NSButton()
+    private let restoreButton = NSButton()
     private let updateLine = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
     private let installButton = NSButton()
     private var checking = false
     private var installing = false
+    private var restoring = false
 
     override init() {
         hints = [
@@ -54,7 +57,10 @@ final class SettingsPanel: NSObject {
         updateLine.maximumNumberOfLines = 8
         updateLine.lineBreakMode = .byWordWrapping
         updateLine.cell?.wraps = true
+        versionLabel.stringValue = Self.visibleVersion()
+        versionLabel.alignment = .right
         mount(updateButton, title: "Проверить обновления", action: #selector(checkUpdates))
+        mount(restoreButton, title: "Вернуть предыдущую", action: #selector(restorePrevious))
         mount(installButton, title: "Установить", action: #selector(installUpdate))
         installButton.isHidden = true
         body.addSubview(titleLabel)
@@ -64,7 +70,9 @@ final class SettingsPanel: NSObject {
         body.addSubview(nativeNote)
         refreshNative()
         body.addSubview(updateTitle)
+        body.addSubview(versionLabel)
         body.addSubview(updateButton)
+        body.addSubview(restoreButton)
         body.addSubview(updateLine)
         body.addSubview(installButton)
     }
@@ -116,12 +124,23 @@ final class SettingsPanel: NSObject {
         }
     }
 
+    /// Номер из собранного приложения, с буквой v.
+    private static func visibleVersion() -> String {
+        guard let raw = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else {
+            return ""
+        }
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return "" }
+        return text.hasPrefix("v") ? text : "v\(text)"
+    }
+
     /// Сверяет сборку с общим main и показывает, что именно готово.
     @objc private func checkUpdates() {
-        guard !checking, !installing else { return }
+        guard !checking, !installing, !restoring else { return }
         checking = true
         installButton.isHidden = true
         updateButton.isEnabled = false
+        restoreButton.isEnabled = false
         updateLine.stringValue = "Проверяю общий main…"
         body.needsLayout = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -130,6 +149,7 @@ final class SettingsPanel: NSObject {
                 guard let self else { return }
                 self.checking = false
                 self.updateButton.isEnabled = true
+                self.restoreButton.isEnabled = true
                 self.installButton.isHidden = !report.canInstall
                 self.updateLine.stringValue = report.text
                 self.body.needsLayout = true
@@ -139,10 +159,11 @@ final class SettingsPanel: NSObject {
 
     /// Забирает общий main, собирает утку и открывает её заново.
     @objc private func installUpdate() {
-        guard !installing, !installButton.isHidden else { return }
+        guard !installing, !restoring, !installButton.isHidden else { return }
         installing = true
         installButton.isEnabled = false
         updateButton.isEnabled = false
+        restoreButton.isEnabled = false
         updateLine.stringValue = "Забираю общий main…"
         body.needsLayout = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -153,6 +174,7 @@ final class SettingsPanel: NSObject {
                     self.installing = false
                     self.installButton.isEnabled = true
                     self.updateButton.isEnabled = true
+                    self.restoreButton.isEnabled = true
                     self.updateLine.stringValue = error
                     self.body.needsLayout = true
                     return
@@ -161,11 +183,37 @@ final class SettingsPanel: NSObject {
                     self.installing = false
                     self.installButton.isEnabled = true
                     self.updateButton.isEnabled = true
+                    self.restoreButton.isEnabled = true
                     self.updateLine.stringValue = "Не удалось начать сборку"
                     self.body.needsLayout = true
                     return
                 }
                 self.updateLine.stringValue = "Собираю и открою заново"
+                NSApp.terminate(nil)
+            }
+        }
+    }
+
+    /// Ставит предыдущую утку на место текущей. Без копии только пишет, что возвращать нечего.
+    @objc private func restorePrevious() {
+        guard !restoring, !installing, !checking else { return }
+        restoring = true
+        restoreButton.isEnabled = false
+        updateButton.isEnabled = false
+        installButton.isEnabled = false
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let error = AppUpdate.startRestore()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let error {
+                    self.restoring = false
+                    self.restoreButton.isEnabled = true
+                    self.updateButton.isEnabled = true
+                    self.installButton.isEnabled = !self.installButton.isHidden
+                    self.updateLine.stringValue = error
+                    self.body.needsLayout = true
+                    return
+                }
                 NSApp.terminate(nil)
             }
         }
@@ -204,13 +252,28 @@ final class SettingsPanel: NSObject {
             y += 36
         }
         y += 8
-        updateTitle.frame = NSRect(x: text.minX, y: y, width: text.width, height: 16)
+        updateTitle.frame = NSRect(x: text.minX, y: y, width: text.width - 88, height: 16)
+        versionLabel.frame = NSRect(x: text.maxX - 88, y: y, width: 88, height: 16)
         y += 24
-        updateButton.frame = NSRect(x: text.minX, y: y, width: updateButton.frame.width + 8, height: 28)
-        y += 34
+        let updateWidth = updateButton.frame.width + 8
+        let restoreWidth = restoreButton.frame.width + 8
+        updateButton.frame = NSRect(x: text.minX, y: y, width: updateWidth, height: 28)
+        let restoreX = text.minX + updateWidth + 8
+        if restoreX + restoreWidth <= text.maxX {
+            restoreButton.frame = NSRect(x: restoreX, y: y, width: restoreWidth, height: 28)
+            y += 34
+        } else {
+            y += 34
+            restoreButton.frame = NSRect(x: text.minX, y: y, width: restoreWidth, height: 28)
+            y += 34
+        }
         if !updateLine.stringValue.isEmpty {
-            let lines = updateLine.stringValue.split(separator: "\n", omittingEmptySubsequences: false).count
-            let height = CGFloat(min(max(lines, 1), 8)) * 16
+            let measured = (updateLine.stringValue as NSString).boundingRect(
+                with: NSSize(width: text.width, height: 128),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: updateLine.font as Any]
+            )
+            let height = min(128, max(16, ceil(measured.height)))
             updateLine.frame = NSRect(x: text.minX, y: y, width: text.width, height: height)
             y += height + 8
         }

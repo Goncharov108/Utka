@@ -1,5 +1,32 @@
 import AppKit
 
+@_silgen_name("proc_listpidspath")
+private func proc_listpidspath(
+    _ type: UInt32,
+    _ typeinfo: UInt32,
+    _ path: UnsafePointer<CChar>?,
+    _ pathflags: UInt32,
+    _ buffer: UnsafeMutableRawPointer?,
+    _ buffersize: Int32
+) -> Int32
+
+/// Кто-то кроме утки ещё держит файл открытым. Пока да — стирать и уносить его нельзя.
+private enum OpenFile {
+    static func othersHold(_ path: String) -> Bool {
+        path.withCString { cPath in
+            var pids = [pid_t](repeating: 0, count: 64)
+            let bytes = Int32(pids.count * MemoryLayout<pid_t>.size)
+            let written = pids.withUnsafeMutableBytes { raw in
+                proc_listpidspath(1, 0, cPath, 2, raw.baseAddress, bytes)
+            }
+            if written < 0 || written >= bytes { return written != 0 }
+            let count = Int(written) / MemoryLayout<pid_t>.size
+            let me = getpid()
+            return pids.prefix(count).contains { $0 != 0 && $0 != me }
+        }
+    }
+}
+
 struct ShelfRecord: Codable, Equatable {
     var id: String
     var name: String
@@ -16,10 +43,14 @@ final class ShelfModel {
     private var watchers: [(source: DispatchSourceFileSystemObject, fd: Int32)] = []
     private var knownShots: Set<String> = []
     private var scanTimer: Timer?
+    private var desktopRetry: Timer?
+    private var protectedDesktopNames: Set<String> = []
+    private var desktopSeen: [String: (size: Int, at: Date)] = [:]
 
     init(storeURL: URL) {
         self.storeURL = storeURL
         load()
+        loadDesktopKeeps()
     }
 
     func add(urls: [URL]) {
@@ -51,20 +82,41 @@ final class ShelfModel {
         onChange?()
     }
 
+    /// Имя снимка, который сейчас тащат на стол: обратный сбор его не трогает.
+    func protectDesktopName(_ name: String) {
+        guard isScreenshotName(name) else { return }
+        guard protectedDesktopNames.insert(name).inserted else { return }
+        saveDesktopKeeps()
+    }
+
+    /// Драг отменён. Если такого файла на столе нет, имя снова можно забирать.
+    func releaseDesktopName(_ name: String) {
+        let path = desktopDirectory().appendingPathComponent(name).path
+        if FileManager.default.fileExists(atPath: path) { return }
+        guard protectedDesktopNames.remove(name) != nil else { return }
+        saveDesktopKeeps()
+    }
+
+    /// Удачный перенос: карточка уходит сразу, свой снимок стирается, когда получатель его отпустил.
+    func consumeDropped(id: String) {
+        guard let record = records.first(where: { $0.id == id }) else { return }
+        let path = record.path
+        let name = (path as NSString).lastPathComponent
+        records.removeAll { $0.id == id }
+        save()
+        onChange?()
+        guard UtkaPaths.ownsShot(path), FileManager.default.fileExists(atPath: path) else { return }
+        knownShots.insert(path)
+        deleteShotWhenIdle(path: path, name: name)
+    }
+
     /// Карточка та же, файл на диске уже другой. Превью нужно перечитать.
     func noteFileChanged() {
         onChange?()
     }
 
     func url(for record: ShelfRecord) -> URL? {
-        if let data = Data(base64Encoded: record.bookmark),
-           let url = BookmarkStore.url(from: data),
-           FileManager.default.fileExists(atPath: url.path) {
-            return url
-        }
-        let pathURL = URL(fileURLWithPath: record.path)
-        if FileManager.default.fileExists(atPath: pathURL.path) { return pathURL }
-        return nil
+        BookmarkStore.locate(bookmark: record.bookmark, path: record.path, name: record.name)
     }
 
     /// Новые скриншоты пишутся в папку утки, а не на стол. Удаление карточки стирает файл.
@@ -90,13 +142,54 @@ final class ShelfModel {
             knownShots.insert(url.path)
             fresh.append(url)
         }
+        var waitForDesktop = false
         for url in imageFiles(in: desktopDirectory()) where isScreenshotName(url.lastPathComponent) && !knownShots.contains(url.path) {
-            guard let moved = moveIntoShots(url) else { continue }
-            knownShots.insert(moved.path)
-            fresh.append(moved)
+            switch desktopShotReadiness(url) {
+            case .leave:
+                desktopSeen[url.path] = nil
+            case .later:
+                waitForDesktop = true
+            case .ready:
+                desktopSeen[url.path] = nil
+                guard let moved = moveIntoShots(url) else { continue }
+                knownShots.insert(moved.path)
+                fresh.append(moved)
+            }
         }
+        if waitForDesktop { scheduleDesktopRetry() }
         guard !fresh.isEmpty else { return }
         add(urls: fresh)
+    }
+
+    /// Свой перенос на стол не забираем. Чужой снимок забираем, только когда запись уже кончилась.
+    private func desktopShotReadiness(_ url: URL) -> DesktopShotReadiness {
+        if protectedDesktopNames.contains(url.lastPathComponent) { return .leave }
+        let size = fileByteCount(url.path)
+        if size <= 0 {
+            let modified = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date) ?? Date()
+            return Date().timeIntervalSince(modified) < 2 ? .later : .leave
+        }
+        let now = Date()
+        if let prior = desktopSeen[url.path] {
+            if prior.size == size, now.timeIntervalSince(prior.at) >= 0.4 {
+                return .ready
+            }
+            if prior.size != size {
+                desktopSeen[url.path] = (size, now)
+            }
+            return .later
+        }
+        desktopSeen[url.path] = (size, now)
+        return .later
+    }
+
+    /// Повторная проверка стола, пока системный снимок ещё дописывается.
+    private func scheduleDesktopRetry() {
+        guard desktopRetry == nil else { return }
+        desktopRetry = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self] _ in
+            self?.desktopRetry = nil
+            self?.scanShots()
+        }
     }
 
     private func desktopDirectory() -> URL {
@@ -209,6 +302,105 @@ final class ShelfModel {
         guard let data = try? encoder.encode(records) else { return }
         try? data.write(to: storeURL, options: .atomic)
     }
+
+    private var keepsURL: URL {
+        storeURL.deletingLastPathComponent().appendingPathComponent("desktop-keeps.json")
+    }
+
+    /// Имена, которые человек сам положил на стол. После перезапуска их не забираем, пока файл там лежит.
+    private func loadDesktopKeeps() {
+        guard let data = try? Data(contentsOf: keepsURL),
+              let names = try? JSONDecoder().decode([String].self, from: data) else { return }
+        let root = desktopDirectory().path
+        protectedDesktopNames = Set(names.filter { name in
+            !name.isEmpty && FileManager.default.fileExists(atPath: (root as NSString).appendingPathComponent(name))
+        })
+        if protectedDesktopNames.count != Set(names.filter { !$0.isEmpty }).count {
+            saveDesktopKeeps()
+        }
+    }
+
+    private func saveDesktopKeeps() {
+        guard let data = try? JSONEncoder().encode(protectedDesktopNames.sorted()) else { return }
+        try? data.write(to: keepsURL, options: .atomic)
+    }
+
+    /// Стирает снимок полки только после того, как получатель дропа закрыл и исходник, и копию на столе.
+    private func deleteShotWhenIdle(path: String, name: String) {
+        let sourceSize = fileByteCount(path)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let started = Date()
+            var quietSince: Date?
+            while true {
+                let held = OpenFile.othersHold(path)
+                let incomplete = self?.desktopCopyIncomplete(name: name, sourceSize: sourceSize) ?? false
+                let onDesktop = self?.desktopHasFile(name) ?? false
+                let busy = held || incomplete
+                let now = Date()
+                if busy {
+                    quietSince = nil
+                } else if quietSince == nil {
+                    quietSince = now
+                }
+                let waited = now.timeIntervalSince(started)
+                let quiet = quietSince.map { now.timeIntervalSince($0) } ?? 0
+                // На столе ждём целый png. В другую папку — пока исходник не отпустят.
+                let minWait: TimeInterval = onDesktop ? 0.3 : 1.5
+                if !busy && waited >= minWait && quiet >= 0.35 { break }
+                if waited > 45 { break }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            guard !OpenFile.othersHold(path) else { return }
+            if self?.desktopCopyIncomplete(name: name, sourceSize: sourceSize) == true { return }
+            self?.deleteOwnedShot(path)
+        }
+    }
+
+    private func desktopHasFile(_ name: String) -> Bool {
+        FileManager.default.fileExists(atPath: desktopDirectory().appendingPathComponent(name).path)
+    }
+
+    /// Копия на столе уже есть, но ещё короче исходника или без заголовка PNG.
+    private func desktopCopyIncomplete(name: String, sourceSize: Int) -> Bool {
+        let dest = desktopDirectory().appendingPathComponent(name).path
+        guard FileManager.default.fileExists(atPath: dest) else { return false }
+        if sourceSize > 0, fileByteCount(dest) < sourceSize { return true }
+        guard dest.lowercased().hasSuffix(".png") else { return false }
+        return !pngHeader(dest)
+    }
+
+    private func deleteOwnedShot(_ path: String) {
+        let url = URL(fileURLWithPath: path)
+        var error: NSError?
+        NSFileCoordinator().coordinate(writingItemAt: url, options: .forDeleting, error: &error) { target in
+            guard !OpenFile.othersHold(target.path) else { return }
+            ShotStore.discard(beside: target.path)
+            try? FileManager.default.removeItem(at: target)
+        }
+        if error != nil, FileManager.default.fileExists(atPath: path), !OpenFile.othersHold(path) {
+            ShotStore.discard(beside: path)
+            try? FileManager.default.removeItem(atPath: path)
+        }
+    }
+
+    private func fileByteCount(_ path: String) -> Int {
+        (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber)?.intValue ?? 0
+    }
+
+    /// Первые восемь байт настоящего PNG.
+    private func pngHeader(_ path: String) -> Bool {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: 8), data.count == 8 else { return false }
+        return data == Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+    }
+}
+
+/// Что делать со снимком, который только что появился на столе.
+private enum DesktopShotReadiness {
+    case leave
+    case later
+    case ready
 }
 
 /// Полка: бросил файл — карточка, утащил — файл уходит и карточка снимается.
@@ -252,6 +444,9 @@ final class ShelfView: NSView {
             card.show(url: model.url(for: record), title: record.name)
             card.consumeOnDrop = true
             card.onDrag = { [weak self] active in self?.onDrag?(active) }
+            card.onExportBegan = { [weak self] name in self?.model.protectDesktopName(name) }
+            card.onExportCancel = { [weak self] name in self?.model.releaseDesktopName(name) }
+            card.onConsume = { [weak self] in self?.model.consumeDropped(id: record.id) }
             card.onRemove = { [weak self] in self?.model.remove(id: record.id) }
             if let url = model.url(for: record) {
                 card.onEdit = { ShotEditor.open(url: url) }

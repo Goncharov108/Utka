@@ -67,15 +67,8 @@ final class PresetsModel {
     }
 
     func url(for preset: Preset) -> URL? {
-        if let raw = preset.bookmark, let data = Data(base64Encoded: raw),
-           let url = BookmarkStore.url(from: data),
-           FileManager.default.fileExists(atPath: url.path) {
-            return url
-        }
-        if let path = preset.path, FileManager.default.fileExists(atPath: path) {
-            return URL(fileURLWithPath: path)
-        }
-        return nil
+        let name = (preset.path as NSString?)?.lastPathComponent ?? preset.title
+        return BookmarkStore.locate(bookmark: preset.bookmark, path: preset.path, name: name)
     }
 
     func reloadIfExternal() {
