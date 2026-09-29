@@ -281,10 +281,19 @@ final class TextRowView: NSView {
 /// Марка в панели: рисуется целиком, без уменьшения в крошечный квадрат.
 final class DuckMarkView: NSView {
     var image: NSImage? { didSet { needsDisplay = true } }
+    var onClick: (() -> Void)?
 
     override func draw(_ dirtyRect: NSRect) {
         NSGraphicsContext.current?.imageInterpolation = .high
         image?.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseUp(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(point) else { return }
+        onClick?()
     }
 }
 

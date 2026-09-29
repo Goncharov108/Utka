@@ -138,13 +138,18 @@ enum ShortcutTranslate {
         return Data(bytes)
     }
 
+    /// Открывает системные языки, где качается пакет перевода.
+    static func openLanguageSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.Localization-Settings.extension") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     /// Один раз открывает системные языки, где качается пакет перевода.
     private static func offerLanguageSettings() {
         let key = "offeredLanguagePack"
         guard !UserDefaults.standard.bool(forKey: key) else { return }
         UserDefaults.standard.set(true, forKey: key)
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.Localization-Settings.extension") else { return }
-        NSWorkspace.shared.open(url)
+        openLanguageSettings()
     }
 
     /// Один раз показывает файл команды, чтобы её можно было добавить.

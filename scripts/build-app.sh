@@ -3,6 +3,19 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+if ! command -v clang >/dev/null 2>&1 || ! command -v swiftc >/dev/null 2>&1; then
+  echo "Установите Command Line Tools: xcode-select --install" >&2
+  exit 1
+fi
+os="$(sw_vers -productVersion)"
+major="${os%%.*}"
+rest="${os#*.}"
+minor="${rest%%.*}"
+if [ "$major" -lt 13 ] || { [ "$major" -eq 13 ] && [ "$minor" -lt 3 ]; }; then
+  echo "Нужна macOS 13.3 или новее. Сейчас $os." >&2
+  exit 1
+fi
+
 # Чёрный квадрат с уткой во всех размерах, которые ждёт Finder.
 write_icon() {
   local src="$1"

@@ -11,6 +11,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var presetsView: PresetsView!
     private var statusItem: NSStatusItem!
     private var toggleItem: NSMenuItem!
+    private let settings = SettingsPanel()
     private var capturing = false
     private var askingCapture = false
 
@@ -35,6 +36,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if section == .presets { self?.presetsView.refresh() }
         }
         panel.onCapture = { [weak self] in self?.captureRegion() }
+        panel.onSettings = { [weak self] in self?.showSettings() }
         shelfView.onDrag = { [weak self] active in self?.hover.suspended = active }
         presetsView.onDrag = { [weak self] active in self?.hover.suspended = active }
         hover.extraHitRect = { [weak self] in
@@ -94,16 +96,28 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let point = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main
         guard let screen else { return }
-        hover.enabled = true
+        setEnabled(true)
         panel.show(on: screen)
     }
 
     @objc private func toggleEnabled() {
-        hover.enabled.toggle()
-        UserDefaults.standard.set(hover.enabled, forKey: "enabled")
-        toggleItem.state = hover.enabled ? .on : .off
-        statusItem.button?.appearsDisabled = !hover.enabled
-        if !hover.enabled { panel.hide() }
+        setEnabled(!hover.enabled)
+    }
+
+    /// Включает жест из меню и из окна настроек одним путём.
+    private func setEnabled(_ on: Bool) {
+        hover.enabled = on
+        UserDefaults.standard.set(on, forKey: "enabled")
+        toggleItem.state = on ? .on : .off
+        statusItem.button?.appearsDisabled = !on
+        settings.setGesture(on)
+        if !on { panel.hide() }
+    }
+
+    /// Окно настроек на том экране, где открыт островок.
+    private func showSettings() {
+        settings.onGesture = { [weak self] on in self?.setEnabled(on) }
+        settings.show(on: panel.window.screen, gestureEnabled: hover.enabled)
     }
 
     /// Если доступ уже выдали живому процессу — сразу открыть крестик.
@@ -155,11 +169,27 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.askingCapture = false
-                guard granted else { return }
+                guard granted else {
+                    self.showCaptureDenied()
+                    return
+                }
                 UserDefaults.standard.set(true, forKey: AreaShot.pendingKey)
                 AreaShot.relaunch()
             }
         }
+    }
+
+    /// Говорит, что запись экрана так и не включилась, и открывает системный переключатель.
+    private func showCaptureDenied() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Запись экрана не включена"
+        alert.informativeText = "Системные настройки → Конфиденциальность и безопасность → Запись экрана. Включи Утку. Если переключатель уже стоит, в Терминале: tccutil reset ScreenCapture dev.goncharov.utka"
+        alert.addButton(withTitle: "Открыть настройки")
+        alert.addButton(withTitle: "ОК")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func sectionClicked(_ sender: NSButton) {

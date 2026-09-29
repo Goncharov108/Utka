@@ -347,6 +347,7 @@ final class IslandPanel {
     private var slideOrderOut = false
     var onSection: ((IslandSection) -> Void)?
     var onCapture: (() -> Void)?
+    var onSettings: (() -> Void)?
 
     init(shelf: NSView, clipboard: NSView, presets: NSView, translator: NSView, mark: NSImage?) {
         sections = [shelf, clipboard, presets, translator]
@@ -441,6 +442,7 @@ final class IslandPanel {
             }
         }
         NotificationCenter.default.post(name: NSView.frameDidChangeNotification, object: root)
+        markView.onClick = { [weak self] in self?.onSettings?() }
     }
 
     func bindActions(target: AnyObject, action: Selector) {
