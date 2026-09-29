@@ -41,7 +41,8 @@ final class SettingsPanel: NSObject {
         window.backgroundColor = .black
         window.appearance = NSAppearance(named: .darkAqua)
         window.isMovableByWindowBackground = true
-        window.level = .floating
+        window.isReleasedWhenClosed = false
+        window.level = .popUpMenu
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         body.arrange = { [weak self] in self?.layoutContents() }
         window.contentView = body
