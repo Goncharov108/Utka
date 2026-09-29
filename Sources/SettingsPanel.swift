@@ -6,25 +6,17 @@ final class SettingsPanel: NSObject {
     private let body = SettingsBody()
     private let titleLabel = UtkaChrome.label("Настройки", size: 18, weight: .semibold)
     private let hints: [NSTextField]
-    private let nativeTitle = UtkaChrome.label("Свой переводчик", size: 13, weight: .semibold)
+    private let nativeTitle = UtkaChrome.label("Перевод", size: 13, weight: .semibold)
     private let nativeState = UtkaChrome.label("", size: 13, color: UtkaChrome.dim)
     private let nativeButton = NSButton()
     private let nativeNote = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
     private var nativeDownloading = false
-    private let languageTitle = UtkaChrome.label("Перевод (запасной, через Apple)", size: 13, weight: .semibold)
-    private let englishName = UtkaChrome.label("Английский", size: 13)
-    private let englishState = UtkaChrome.label("", size: 13, color: UtkaChrome.dim)
-    private let russianName = UtkaChrome.label("Русский", size: 13)
-    private let russianState = UtkaChrome.label("", size: 13, color: UtkaChrome.dim)
-    private let languageButton = NSButton()
-    private let languageNote = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
     private let updateTitle = UtkaChrome.label("Обновления", size: 13, weight: .semibold)
     private let updateButton = NSButton()
     private let updateLine = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
     private let installButton = NSButton()
     private var checking = false
     private var installing = false
-    private var downloading = false
 
     override init() {
         hints = [
@@ -54,17 +46,11 @@ final class SettingsPanel: NSObject {
         body.arrange = { [weak self] in self?.layoutContents() }
         window.contentView = body
         for hint in hints { body.addSubview(hint) }
-        englishState.alignment = .right
-        russianState.alignment = .right
-        languageNote.maximumNumberOfLines = 2
-        languageNote.lineBreakMode = .byWordWrapping
-        languageNote.cell?.wraps = true
         nativeState.alignment = .right
         nativeNote.maximumNumberOfLines = 2
         nativeNote.lineBreakMode = .byWordWrapping
         nativeNote.cell?.wraps = true
         mount(nativeButton, title: "Скачать (≈150 МБ)", action: #selector(downloadNative))
-        mount(languageButton, title: "Скачать английский и русский", action: #selector(downloadLanguages))
         updateLine.maximumNumberOfLines = 8
         updateLine.lineBreakMode = .byWordWrapping
         updateLine.cell?.wraps = true
@@ -77,14 +63,6 @@ final class SettingsPanel: NSObject {
         body.addSubview(nativeButton)
         body.addSubview(nativeNote)
         refreshNative()
-        body.addSubview(languageTitle)
-        body.addSubview(englishName)
-        body.addSubview(englishState)
-        body.addSubview(russianName)
-        body.addSubview(russianState)
-        body.addSubview(languageButton)
-        body.addSubview(languageNote)
-        refreshLanguages()
         body.addSubview(updateTitle)
         body.addSubview(updateButton)
         body.addSubview(updateLine)
@@ -105,12 +83,11 @@ final class SettingsPanel: NSObject {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(body)
         refreshNative()
-        refreshLanguages()
     }
 
-    /// Свой движок перевода: не Apple, не Google, не сторонний сервис —
-    /// utka-apps/utka-translate. Пока не скачан, Утка переводит через Apple
-    /// или через интернет как запасной путь.
+    /// Свой офлайн-движок перевода: utka-apps/utka-translate. Единственный
+    /// способ перевода в Утке — ни Apple, ни какой-либо сторонний сервис,
+    /// ни открытие системных настроек здесь больше не задействованы.
     private func refreshNative() {
         let ready = NativeTranslate.isInstalled
         nativeState.stringValue = ready ? "скачан" : "нет"
@@ -137,37 +114,6 @@ final class SettingsPanel: NSObject {
                 self.body.needsLayout = true
             }
         }
-    }
-
-    /// Подписи «скачан» только по файлам. Кнопка скачивания — если какого-то пакета нет.
-    private func refreshLanguages() {
-        let packs = LanguagePacks.items()
-        paint(englishState, ready: packs.contains { $0.title == "Английский" && $0.ready })
-        paint(russianState, ready: packs.contains { $0.title == "Русский" && $0.ready })
-        let missing = packs.contains { !$0.ready }
-        languageButton.isHidden = !missing
-        languageButton.isEnabled = !downloading
-        if !missing {
-            languageNote.stringValue = ""
-        }
-        body.needsLayout = true
-    }
-
-    /// «Скачан», только когда пакет уже лежит на диске.
-    private func paint(_ label: NSTextField, ready: Bool) {
-        label.stringValue = ready ? "скачан" : "нет"
-        label.textColor = ready ? UtkaChrome.ink : UtkaChrome.dim
-    }
-
-    /// Сразу открывает системные настройки языка — без попытки скачать через
-    /// приватный API Apple. Тот путь надёжной проверкой не защитить: если
-    /// загрузка в регионе недоступна, сбой происходит внутри самого закрытого
-    /// кода Apple и роняет всё приложение, а не только эту попытку — уже
-    /// после того, как снаружи все проверки пройдены. Дважды проверено вживую.
-    @objc private func downloadLanguages() {
-        languageNote.stringValue = "Открываю настройки языка — там и качается"
-        body.needsLayout = true
-        ShortcutTranslate.openLanguageSettings()
     }
 
     /// Сверяет сборку с общим main и показывает, что именно готово.
@@ -225,14 +171,6 @@ final class SettingsPanel: NSObject {
         }
     }
 
-    /// Строка языка: имя слева, «скачан» или «нет» справа.
-    private func placePack(_ name: NSTextField, _ state: NSTextField, y: CGFloat, text: NSRect) -> CGFloat {
-        let stateWidth: CGFloat = 88
-        name.frame = NSRect(x: text.minX, y: y, width: text.width - stateWidth, height: 18)
-        state.frame = NSRect(x: text.maxX - stateWidth, y: y, width: stateWidth, height: 18)
-        return y + 22
-    }
-
     /// Кнопка с тем же гротеском, что и остальное окно.
     private func mount(_ button: NSButton, title: String, action: Selector) {
         button.title = title
@@ -263,20 +201,6 @@ final class SettingsPanel: NSObject {
         }
         if !nativeNote.stringValue.isEmpty {
             nativeNote.frame = NSRect(x: text.minX, y: y, width: text.width, height: 32)
-            y += 36
-        }
-        y += 10
-        languageTitle.frame = NSRect(x: text.minX, y: y, width: text.width, height: 16)
-        y += 24
-        y = placePack(englishName, englishState, y: y, text: text)
-        y = placePack(russianName, russianState, y: y, text: text)
-        if !languageButton.isHidden {
-            y += 6
-            languageButton.frame = NSRect(x: text.minX, y: y, width: languageButton.frame.width + 8, height: 28)
-            y += 34
-        }
-        if !languageNote.stringValue.isEmpty {
-            languageNote.frame = NSRect(x: text.minX, y: y, width: text.width, height: 32)
             y += 36
         }
         y += 8
