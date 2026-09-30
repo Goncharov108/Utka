@@ -63,6 +63,8 @@ final class SettingsPanel: NSObject {
     private let titleLabel = UtkaChrome.label("Настройки", size: 18, weight: .semibold)
     private let railLine = NSView()
     private let chevron = SidebarGlyph()
+    private let chevronMark: NSImage = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Подменю островка")?
+        .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold)) ?? NSImage()
     private let nest = FlippedView()
     private let pill = NSView()
     private var sideButtons: [MenuRow] = []
@@ -70,6 +72,14 @@ final class SettingsPanel: NSObject {
     private var pillTarget = NSRect.zero
     private var motionTimer: Timer?
     private var sectionLines: [SectionLine] = []
+    private var dragLine: SectionLine?
+    private var settlingLine: SectionLine?
+    private var dragY: CGFloat = 0
+    private var sectionOrigin: CGFloat = 0
+    private var sectionHome: [ObjectIdentifier: CGFloat] = [:]
+    private var sectionShown: [ObjectIdentifier: CGFloat] = [:]
+    private var lift: CGFloat = 0
+    private var liftTarget: CGFloat = 0
     private var page: SettingsPage = .theme
     /// 0 — подменю спрятано, 1 — раскрыто. Между ними кадры таймера.
     private var reveal: CGFloat = 1
@@ -213,10 +223,9 @@ final class SettingsPanel: NSObject {
         pill.wantsLayer = true
         pill.layer?.cornerRadius = 10
         quietLayer(pill)
-        chevron.wantsLayer = true
-        chevron.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Подменю островка")?
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+        chevron.image = chevronMark
         chevron.imageScaling = .scaleProportionallyDown
+        chevron.contentTintColor = UtkaChrome.dim
         body.addSubview(pill)
         body.addSubview(titleLabel)
         body.addSubview(railLine)
@@ -235,13 +244,9 @@ final class SettingsPanel: NSObject {
             row.removeFromSuperview()
             nest.addSubview(row)
         }
-        sectionLines = [
-            ("Полка", "square.stack.3d.up"),
-            ("Буфер", "doc.on.clipboard"),
-            ("Закрепы", "pin"),
-            ("Переводчик", "character.book.closed")
-        ].map { SectionLine(title: $0.0, symbol: $0.1) }
+        sectionLines = IslandSection.order.map { makeSectionLine($0) }
         sectionLines.forEach { body.addSubview($0) }
+        refreshSectionToggles()
         body.addSubview(nativeTitle)
         body.addSubview(nativeState)
         body.addSubview(nativeButton)
@@ -449,6 +454,25 @@ final class SettingsPanel: NSObject {
                 pillRect = pillTarget
             }
         }
+        if abs(lift - liftTarget) > 0.01 {
+            lift += (liftTarget - lift) * 0.2
+            moving = true
+        } else {
+            lift = liftTarget
+        }
+        for line in sectionLines {
+            let id = ObjectIdentifier(line)
+            guard line !== dragLine, let home = sectionHome[id], var shown = sectionShown[id] else { continue }
+            let dy = home - shown
+            if abs(dy) > 0.4 {
+                shown += dy * 0.2
+                sectionShown[id] = shown
+                moving = true
+            } else {
+                sectionShown[id] = home
+            }
+        }
+        if !moving { settlingLine = nil }
         body.needsLayout = true
         guard !moving else { return }
         timer.invalidate()
@@ -684,11 +708,7 @@ final class SettingsPanel: NSObject {
         place(island, NSRect(x: x, y: y, width: width, height: row))
         place(chevron, NSRect(x: x + width - 26, y: y + (row - 14) / 2, width: 14, height: 14))
         body.addSubview(chevron, positioned: .above, relativeTo: nil)
-        let angle = (1 - reveal) * (-.pi / 2)
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        chevron.layer?.transform = CATransform3DMakeRotation(angle, 0, 0, 1)
-        CATransaction.commit()
+        turnChevron()
         var cursor = y + row + gap
         let full = CGFloat(children.count) * (row + gap)
         nest.frame = NSRect(x: x, y: cursor, width: width, height: max(0, full * reveal))
@@ -708,6 +728,27 @@ final class SettingsPanel: NSObject {
         }
         pourPill()
         return cursor + 8
+    }
+
+    /// Стрелка остаётся справа в строке. Поворот слоя уносил её влево: якорь вида в нуле.
+    private func turnChevron() {
+        let angle = (1 - reveal) * (.pi / 2)
+        guard abs(angle) > 0.001 else {
+            chevron.image = chevronMark
+            return
+        }
+        let size = chevronMark.size
+        let turned = NSImage(size: size, flipped: false) { rect in
+            let transform = NSAffineTransform()
+            transform.translateX(by: rect.midX, yBy: rect.midY)
+            transform.rotate(byRadians: angle)
+            transform.translateX(by: -rect.midX, yBy: -rect.midY)
+            transform.concat()
+            self.chevronMark.draw(in: rect)
+            return true
+        }
+        turned.isTemplate = true
+        chevron.image = turned
     }
 
     /// Цель подсветки — выбранная строка. Пока едет, пятно тянется в сторону цели.
@@ -741,16 +782,97 @@ final class SettingsPanel: NSObject {
         return sideButtons.first { $0.rowTag == page.rawValue }
     }
 
-    /// Полка, буфер, закрепы и переводчик.
+    /// Строка раздела, которую можно перетащить. Порядок пишется и на островок.
+    private func makeSectionLine(_ section: IslandSection) -> SectionLine {
+        let line = SectionLine(section: section)
+        line.onDrag = { [weak self, weak line] y in
+            guard let self, let line else { return }
+            self.dragLine = line
+            self.settlingLine = nil
+            self.dragY = y
+            self.liftTarget = 1
+            self.reorderDragged()
+            self.body.addSubview(line, positioned: .above, relativeTo: nil)
+            self.kickMotion()
+            self.body.needsLayout = true
+        }
+        line.onDrop = { [weak self, weak line] in
+            guard let self else { return }
+            if self.dragLine === line {
+                self.settlingLine = line
+                self.dragLine = nil
+                self.liftTarget = 0
+                self.kickMotion()
+            }
+            self.body.needsLayout = true
+        }
+        line.onToggle = { [weak self] on in
+            IslandSection.setShown(section, on)
+            self?.refreshSectionToggles()
+        }
+        return line
+    }
+
+    /// Тумблеры по записи. Последний включённый не даёт себя выключить.
+    private func refreshSectionToggles() {
+        let alone = IslandSection.visible.count <= 1
+        for line in sectionLines {
+            let on = IslandSection.isShown(line.section)
+            line.setShown(on, enabled: !(on && alone))
+        }
+    }
+
+    /// Пока строку тащат, она меняется местами с той, чью середину пересекла.
+    private func reorderDragged() {
+        guard dragLine != nil else { return }
+        let pitch: CGFloat = 48
+        let target = min(max(0, Int(((dragY - sectionOrigin) / pitch).rounded())), sectionLines.count - 1)
+        guard let from = sectionLines.firstIndex(where: { $0 === dragLine }), from != target else { return }
+        let line = sectionLines.remove(at: from)
+        sectionLines.insert(line, at: target)
+        IslandSection.order = sectionLines.map(\.section)
+    }
+
+    /// Полка, буфер, закрепы и переводчик. Соседи едут к слоту, тянущаяся — за курсором.
     private func layoutSections(text: NSRect, y: CGFloat) -> CGFloat {
-        var y = y
+        sectionOrigin = y
         let row: CGFloat = 40
         let gap: CGFloat = 8
-        for line in sectionLines {
-            line.frame = NSRect(x: text.minX, y: y, width: text.width, height: row)
-            y += row + gap
+        let pitch = row + gap
+        let limit = y + CGFloat(max(0, sectionLines.count - 1)) * pitch
+        let traveling = dragLine != nil || settlingLine != nil
+        var homes: [ObjectIdentifier: CGFloat] = [:]
+        for (index, line) in sectionLines.enumerated() {
+            let id = ObjectIdentifier(line)
+            let home = y + CGFloat(index) * pitch
+            homes[id] = home
+            let shown: CGFloat
+            if line === dragLine {
+                shown = min(max(dragY, y), limit)
+            } else if traveling, let current = sectionShown[id] {
+                shown = current
+            } else {
+                shown = home
+            }
+            sectionShown[id] = shown
+            let raised = line === dragLine || line === settlingLine
+            let extra = raised ? 2 * lift : 0
+            line.frame = NSRect(
+                x: text.minX - extra,
+                y: shown - extra,
+                width: text.width + extra * 2,
+                height: row + extra * 2
+            )
+            line.setLift(raised ? lift : 0)
         }
-        return y
+        sectionHome = homes
+        if let raised = dragLine ?? settlingLine {
+            body.addSubview(raised, positioned: .above, relativeTo: nil)
+        }
+        if traveling || abs(lift - liftTarget) > 0.01 {
+            kickMotion()
+        }
+        return y + CGFloat(sectionLines.count) * pitch
     }
 
     /// Звук на полосе и плагин.
@@ -1114,38 +1236,127 @@ private final class SidebarGlyph: NSImageView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
-/// Строка раздела островка: иконка и имя.
+/// Строка раздела островка: иконка, имя, тумблер и захват для перестановки.
 private final class SectionLine: NSView {
+    let section: IslandSection
+    var onDrag: ((CGFloat) -> Void)?
+    var onDrop: (() -> Void)?
+    var onToggle: ((Bool) -> Void)?
     private let icon = NSImageView()
     private let titleLabel: NSTextField
+    private let grip = NSImageView()
+    private let toggle = NSSwitch()
+    private var grab: CGFloat = 0
+    private var shown = true
 
-    init(title: String, symbol: String) {
-        titleLabel = UtkaChrome.label(title, size: 13, weight: .medium)
+    init(section: IslandSection) {
+        self.section = section
+        titleLabel = UtkaChrome.label(section.listTitle, size: 13, weight: .medium)
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 8
-        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
+        let still = StillLayer()
+        layer?.actions = [
+            "bounds": still,
+            "position": still,
+            "backgroundColor": still,
+            "transform": still,
+            "shadowOpacity": still,
+            "shadowRadius": still,
+            "shadowOffset": still,
+            "shadowPath": still,
+            "shadowColor": still
+        ]
+        icon.image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: section.listTitle)?
             .withSymbolConfiguration(.init(pointSize: 15, weight: .medium))
         icon.imageScaling = .scaleProportionallyDown
+        grip.image = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: "Перетащить")?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        grip.imageScaling = .scaleProportionallyDown
+        toggle.target = self
+        toggle.action = #selector(toggled)
         addSubview(icon)
         addSubview(titleLabel)
+        addSubview(grip)
+        addSubview(toggle)
         applyLook()
     }
 
     required init?(coder: NSCoder) { nil }
 
+    /// Тень на время перетаскивания. Ноль — карточка снова лежит в слоте.
+    func setLift(_ amount: CGFloat) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = Float(0.32 * amount)
+        layer?.shadowRadius = 12 * amount
+        layer?.shadowOffset = CGSize(width: 0, height: -4 * amount)
+        layer?.shadowPath = CGPath(roundedRect: bounds, cornerWidth: 8, cornerHeight: 8, transform: nil)
+        CATransaction.commit()
+    }
+
+    /// Включён — раздел на островке. Последний включённый тумблер не нажимается.
+    func setShown(_ on: Bool, enabled: Bool) {
+        shown = on
+        toggle.state = on ? .on : .off
+        toggle.isEnabled = enabled
+        applyShown()
+    }
+
     /// Подтягивает строку под текущую тему.
     func applyLook() {
         layer?.backgroundColor = UtkaChrome.card.cgColor
-        titleLabel.textColor = UtkaChrome.ink
-        icon.contentTintColor = UtkaChrome.ink
+        grip.contentTintColor = UtkaChrome.dim
+        applyShown()
+    }
+
+    private func applyShown() {
+        let color = shown ? UtkaChrome.ink : UtkaChrome.dim
+        titleLabel.textColor = color
+        icon.contentTintColor = color
+    }
+
+    @objc private func toggled() {
+        onToggle?(toggle.state == .on)
     }
 
     override func layout() {
         super.layout()
         let side = min(18, bounds.height - 8)
         icon.frame = NSRect(x: 12, y: (bounds.height - side) / 2, width: side, height: side)
-        titleLabel.frame = NSRect(x: 40, y: (bounds.height - 18) / 2, width: max(40, bounds.width - 52), height: 18)
+        var switchSize = toggle.fittingSize
+        if switchSize.width < 8 { switchSize = NSSize(width: 38, height: 22) }
+        toggle.frame = NSRect(
+            x: bounds.width - 12 - switchSize.width,
+            y: (bounds.height - switchSize.height) / 2,
+            width: switchSize.width,
+            height: switchSize.height
+        )
+        grip.frame = NSRect(x: toggle.frame.minX - 22, y: (bounds.height - 14) / 2, width: 16, height: 14)
+        titleLabel.frame = NSRect(x: 40, y: (bounds.height - 18) / 2, width: max(40, grip.frame.minX - 48), height: 18)
+    }
+
+    override func resetCursorRects() {
+        let drag = NSRect(x: 0, y: 0, width: max(0, toggle.frame.minX), height: bounds.height)
+        addCursorRect(drag, cursor: .openHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        grab = bounds.height - local.y
+        NSCursor.closedHand.push()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let parent = superview else { return }
+        let point = parent.convert(event.locationInWindow, from: nil)
+        onDrag?(point.y - grab)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        NSCursor.pop()
+        onDrop?()
     }
 }
 

@@ -20,6 +20,80 @@ enum IslandSection: Int, CaseIterable {
         case .translate: return "character.book.closed"
         }
     }
+
+    /// Имя в списке настроек. Подсказка на островке остаётся своей.
+    var listTitle: String {
+        switch self {
+        case .shelf: return "Полка"
+        case .clipboard: return "Буфер"
+        case .presets: return "Закрепы"
+        case .translate: return "Переводчик"
+        }
+    }
+
+    static let orderChanged = Notification.Name("utka.sectionOrder")
+    private static let orderKey = "islandSectionOrder"
+    private static let shownKey = "islandSectionShown"
+
+    /// Сверху вниз, как на полосе островка. Пустая запись — прежний порядок.
+    static var order: [IslandSection] {
+        get { storedOrder() }
+        set {
+            let next = normalized(newValue)
+            guard next != storedOrder() else { return }
+            UserDefaults.standard.set(next.map(\.rawValue), forKey: orderKey)
+            NotificationCenter.default.post(name: orderChanged, object: nil)
+        }
+    }
+
+    private static func storedOrder() -> [IslandSection] {
+        guard let raw = UserDefaults.standard.array(forKey: orderKey) as? [Int] else {
+            return allCases
+        }
+        return normalized(raw.compactMap(IslandSection.init(rawValue:)))
+    }
+
+    /// Каждый раздел один раз, недостающие дописываются в конец.
+    private static func normalized(_ items: [IslandSection]) -> [IslandSection] {
+        var seen = Set<IslandSection>()
+        var result: [IslandSection] = []
+        for item in items where seen.insert(item).inserted {
+            result.append(item)
+        }
+        for item in allCases where seen.insert(item).inserted {
+            result.append(item)
+        }
+        return result
+    }
+
+    /// Раздел на полосе островка. Пока запись пустая, включены все.
+    static func isShown(_ section: IslandSection) -> Bool {
+        guard let raw = UserDefaults.standard.array(forKey: shownKey) as? [Int] else { return true }
+        return raw.contains(section.rawValue)
+    }
+
+    /// Включённые разделы сверху вниз. Хотя бы один остаётся на полосе.
+    static var visible: [IslandSection] {
+        let shown = order.filter(isShown)
+        if !shown.isEmpty { return shown }
+        return Array(order.prefix(1))
+    }
+
+    /// Включает или прячет раздел. Последний включённый не выключается.
+    static func setShown(_ section: IslandSection, _ on: Bool) {
+        var shown = Set(allCases.filter(isShown))
+        if on {
+            shown.insert(section)
+        } else {
+            guard shown.count > 1 else { return }
+            shown.remove(section)
+        }
+        let next = allCases.compactMap { shown.contains($0) ? $0.rawValue : nil }
+        let stored = UserDefaults.standard.array(forKey: shownKey) as? [Int] ?? allCases.map(\.rawValue)
+        guard Set(next) != Set(stored) else { return }
+        UserDefaults.standard.set(next, forKey: shownKey)
+        NotificationCenter.default.post(name: orderChanged, object: nil)
+    }
 }
 
 /// Панель без рамки, которая может принять фокус для полей текста.
@@ -733,6 +807,8 @@ final class IslandPanel {
     private let shotTarget = ShotButtonTarget()
     private let body = NSView()
     private let buttons: [NSButton]
+    private var buttonTargets: [Int: NSRect] = [:]
+    private var buttonMotion: Timer?
     private let sections: [NSView]
     private var current: IslandSection = .shelf
     private var slideTimer: Timer?
@@ -902,11 +978,7 @@ final class IslandPanel {
         NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: root, queue: .main) { _ in
             rail.frame = NSRect(x: 0, y: 0, width: 88, height: self.root.bounds.height)
             markView.frame = NSRect(x: 44, y: self.root.bounds.height - 86, width: 40, height: 40)
-            var y = self.root.bounds.height - 132
-            for button in made {
-                button.frame = NSRect(x: 46, y: y, width: 36, height: 36)
-                y -= 42
-            }
+            self.placeSectionButtons(animated: false)
             let bottom: CGFloat = 14
             let right: CGFloat = 48
             let barH: CGFloat = 32
@@ -932,7 +1004,68 @@ final class IslandPanel {
         NotificationCenter.default.addObserver(forName: IslandLook.changed, object: nil, queue: .main) { [weak self] _ in
             self?.applyLook()
         }
+        NotificationCenter.default.addObserver(forName: IslandSection.orderChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.placeSectionButtons(animated: true)
+        }
         applyLook()
+    }
+
+    /// Кнопки разделов сверху вниз в сохранённом порядке.
+    private func placeSectionButtons(animated: Bool) {
+        var y = root.bounds.height - 132
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let visible = Set(IslandSection.visible.map(\.rawValue))
+        for button in buttons {
+            let on = visible.contains(button.tag)
+            button.isHidden = !on
+            if !on { buttonTargets.removeValue(forKey: button.tag) }
+        }
+        for section in IslandSection.visible {
+            guard let button = buttons.first(where: { $0.tag == section.rawValue }) else { continue }
+            let target = NSRect(x: 46, y: y, width: 36, height: 36)
+            y -= 42
+            buttonTargets[section.rawValue] = target
+            if !animated { button.frame = target }
+        }
+        CATransaction.commit()
+        if animated { kickButtonMotion() }
+        let visibleOrder = IslandSection.visible
+        if !visibleOrder.contains(current), let next = visibleOrder.first {
+            select(next)
+        }
+    }
+
+    /// Иконки разделов доезжают сами: системный аниматор у утки не тикает.
+    private func kickButtonMotion() {
+        guard buttonMotion == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            self?.stepButtons(timer)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        buttonMotion = timer
+    }
+
+    private func stepButtons(_ timer: Timer) {
+        var moving = false
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for button in buttons {
+            guard let target = buttonTargets[button.tag] else { continue }
+            let dy = target.origin.y - button.frame.origin.y
+            if abs(dy) > 0.4 {
+                var frame = button.frame
+                frame.origin.y += dy * 0.22
+                button.frame = frame
+                moving = true
+            } else {
+                button.frame = target
+            }
+        }
+        CATransaction.commit()
+        guard !moving else { return }
+        timer.invalidate()
+        buttonMotion = nil
     }
 
     func bindActions(target: AnyObject, action: Selector) {

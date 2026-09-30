@@ -66,6 +66,21 @@ final class PresetsModel {
         onChange?()
     }
 
+    /// Меняет запись местами с соседней того же вида. Чужой вид между ними остаётся на своём индексе.
+    func move(id: String, up: Bool) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        let kind = items[index].kind
+        let step = up ? -1 : 1
+        var neighbor = index + step
+        while items.indices.contains(neighbor), items[neighbor].kind != kind {
+            neighbor += step
+        }
+        guard items.indices.contains(neighbor) else { return }
+        items.swapAt(index, neighbor)
+        save()
+        onChange?()
+    }
+
     func url(for preset: Preset) -> URL? {
         let name = (preset.path as NSString?)?.lastPathComponent ?? preset.title
         return BookmarkStore.locate(bookmark: preset.bookmark, path: preset.path, name: name)
@@ -266,21 +281,37 @@ final class PresetsView: NSView {
     private func rebuild() {
         fileDocument.subviews.forEach { $0.removeFromSuperview() }
         textDocument.subviews.forEach { $0.removeFromSuperview() }
-        cards = model.files.map { preset in
+        let files = model.files
+        cards = files.enumerated().map { index, preset in
             let card = FileCardView()
             card.show(url: model.url(for: preset), title: preset.title)
             card.consumeOnDrop = false
             card.onDrag = { [weak self] active in self?.onDrag?(active) }
             card.onRemove = { [weak self] in self?.askRemove(preset) }
+            card.showsOrder = files.count > 1
+            if index > 0 {
+                card.onMoveUp = { [weak self] in self?.model.move(id: preset.id, up: true) }
+            }
+            if index < files.count - 1 {
+                card.onMoveDown = { [weak self] in self?.model.move(id: preset.id, up: false) }
+            }
             if let url = model.url(for: preset) {
                 card.onEdit = { ShotEditor.open(url: url) }
             }
             fileDocument.addSubview(card)
             return card
         }
-        rows = model.texts.map { preset in
+        let texts = model.texts
+        rows = texts.enumerated().map { index, preset in
             let row = TextRowView()
             row.isExpanded = expanded.contains(preset.id)
+            row.showsOrder = texts.count > 1
+            if index > 0 {
+                row.onMoveUp = { [weak self] in self?.model.move(id: preset.id, up: true) }
+            }
+            if index < texts.count - 1 {
+                row.onMoveDown = { [weak self] in self?.model.move(id: preset.id, up: false) }
+            }
             row.show(title: preset.title, detail: oneLine(preset.body ?? ""), body: preset.body ?? "")
             row.onClick = { [weak self] in
                 guard let body = preset.body else { return }
