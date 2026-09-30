@@ -49,14 +49,13 @@ enum AppUpdate {
     static func prepareInstall() -> String? {
         guard let repo = repoRoot() else { return "Рядом с приложением нет папки с кодом" }
         guard let remote = sharedRemote(in: repo) else { return "Нет общего репозитория utka-apps" }
-        let dirty = git(repo, ["status", "--porcelain", "--untracked-files=no"])
-        guard dirty.code == 0 else { return "Не удалось проверить папку" }
-        if !dirty.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "В папке есть несохранённые правки"
+        if let error = discardStrayVersionFile(repo) {
+            return error
         }
         guard fetchMain(repo, remote) else {
             return "Не удалось забрать общий main"
         }
+        dropAutomaticVersionCommits(repo, remote: remote)
         if git(repo, ["merge", "--ff-only", "\(remote)/main"]).code == 0 {
             return nil
         }
@@ -65,6 +64,54 @@ enum AppUpdate {
         }
         _ = git(repo, ["merge", "--abort"])
         return "Общий main не лёг поверх текущей ветки"
+    }
+
+    /// Если в папке изменён только номер, возвращает файл как в последнем сохранении.
+    /// Другие правки по-прежнему останавливают установку.
+    private static func discardStrayVersionFile(_ repo: URL) -> String? {
+        let dirty = git(repo, ["status", "--porcelain", "--untracked-files=no"])
+        guard dirty.code == 0 else { return "Не удалось проверить папку" }
+        let lines = dirty.out.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
+        if lines.isEmpty { return nil }
+        let onlyVersion = lines.allSatisfy { line in
+            !line.contains(" -> ") && line.split(separator: " ").last == "VERSION"
+        }
+        guard onlyVersion else { return "В папке есть несохранённые правки" }
+        guard git(repo, ["checkout", "HEAD", "--", "VERSION"]).code == 0 else {
+            return "В папке есть несохранённые правки"
+        }
+        return nil
+    }
+
+    /// Снимает с кончика ветки сохранения «Версия 1.0.5», которых нет на общем main.
+    /// Такие пишет старая локальная сборка. Чужие правки не трогает.
+    private static func dropAutomaticVersionCommits(_ repo: URL, remote: String) {
+        let listed = git(repo, ["rev-list", "--first-parent", "\(remote)/main..HEAD"])
+        guard listed.code == 0 else { return }
+        var count = 0
+        for raw in listed.out.split(whereSeparator: \.isNewline) {
+            let commit = String(raw).trimmingCharacters(in: .whitespaces)
+            guard !commit.isEmpty, isAutomaticVersionCommit(repo, commit) else { break }
+            count += 1
+        }
+        guard count > 0 else { return }
+        _ = git(repo, ["reset", "--hard", "HEAD~\(count)"])
+    }
+
+    /// Сохранение старой сборки: подпись «Версия 1.2.3» и в нём только файл номера.
+    private static func isAutomaticVersionCommit(_ repo: URL, _ commit: String) -> Bool {
+        let subject = git(repo, ["log", "-1", "--format=%s", commit])
+        guard subject.code == 0 else { return false }
+        let title = subject.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard title.range(of: #"^Версия [0-9]+\.[0-9]+\.[0-9]+$"#, options: .regularExpression) != nil else {
+            return false
+        }
+        let files = git(repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", commit])
+        guard files.code == 0 else { return false }
+        let names = files.out.split(whereSeparator: \.isNewline).map {
+            String($0).trimmingCharacters(in: .whitespaces)
+        }.filter { !$0.isEmpty }
+        return names == ["VERSION"]
     }
 
     /// Собирает приложение после выхода текущего процесса и открывает его снова.
