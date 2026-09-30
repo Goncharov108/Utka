@@ -1179,15 +1179,17 @@ final class IslandPanel {
         view.frame = body.bounds
         view.autoresizingMask = [.width, .height]
         body.addSubview(view)
+        if let note = view as? NotepadIslandView { note.focusText() }
         for button in railButtons {
             let on = button.slotID == id
             button.contentTintColor = on ? IslandLook.accent : UtkaChrome.dim
         }
     }
 
-    /// Тело ядра уже собрано. У раздела библиотеки тело — тихая карточка.
+    /// Тело ядра уже собрано. Блокнот — своё поле. Остальные разделы библиотеки — тихая карточка.
     private func viewFor(_ id: String) -> NSView {
         if let core = bodies[id], IslandSection(slotID: id) != nil { return core }
+        if id == "notepad" { return notepadView() }
         let title = SectionBoard.order.first { $0.id == id }?.listTitle ?? id
         if let card = bodies[id] as? LibrarySectionBody {
             card.setTitle(title)
@@ -1196,6 +1198,48 @@ final class IslandPanel {
         let card = LibrarySectionBody(title: title)
         bodies[id] = card
         return card
+    }
+
+    /// Поле блокнота. Черновик живёт, пока утка открыта.
+    private func notepadView() -> NotepadIslandView {
+        if let view = bodies["notepad"] as? NotepadIslandView { return view }
+        let view = NotepadIslandView()
+        view.onFile = { [weak self] url, anchor in
+            self?.sendNoteToShelf(url, from: anchor)
+        }
+        bodies["notepad"] = view
+        return view
+    }
+
+    /// Значок файла летит к кнопке полки, затем файл встаёт на полку и полка открывается.
+    private func sendNoteToShelf(_ url: URL, from anchor: NSView) {
+        let openShelf = { [weak self] in
+            ShotEditor.shelf?.add(urls: [url])
+            self?.show(id: IslandSection.shelf.slotID)
+        }
+        guard let shelfButton = railButtons.first(where: { $0.slotID == IslandSection.shelf.slotID }) else {
+            openShelf()
+            return
+        }
+        let flyer = NSImageView()
+        flyer.wantsLayer = true
+        flyer.image = NSImage(systemSymbolName: "doc.text", accessibilityDescription: "Файл")
+        flyer.contentTintColor = UtkaChrome.ink
+        flyer.imageScaling = .scaleProportionallyDown
+        let size: CGFloat = 18
+        let start = anchor.convert(anchor.bounds, to: root)
+        let end = shelfButton.convert(shelfButton.bounds, to: root)
+        flyer.frame = NSRect(x: start.midX - size / 2, y: start.midY - size / 2, width: size, height: size)
+        root.addSubview(flyer)
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.45
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            flyer.animator().frame = NSRect(x: end.midX - size / 2, y: end.midY - size / 2, width: size, height: size)
+            flyer.animator().alphaValue = 0.2
+        }, completionHandler: {
+            flyer.removeFromSuperview()
+            openShelf()
+        })
     }
 
     private func frame(on screen: NSScreen) -> CGRect {
