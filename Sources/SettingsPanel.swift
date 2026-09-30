@@ -659,6 +659,11 @@ final class SettingsPanel: NSObject {
         button.sizeToFit()
     }
 
+    /// Ширина по подписи. Текущий кадр не копится: иначе кнопка растёт каждый проход.
+    private func buttonWidth(_ button: NSButton) -> CGFloat {
+        ceil(button.fittingSize.width) + 8
+    }
+
     private func layoutContents() {
         guard !layingOut else { return }
         layingOut = true
@@ -673,7 +678,9 @@ final class SettingsPanel: NSObject {
         titleLabel.frame = NSRect(x: 24, y: chromeTop, width: 132, height: titleHeight)
         let sideTop: CGFloat = chromeTop + 36
         let text = NSRect(x: rail + 24, y: 0, width: max(160, width - rail - 24 - pad), height: 0)
-        let sideBottom = layoutSidebar(x: 12, y: sideTop, width: rail - 20)
+        let sideX: CGFloat = 12
+        let sideW = rail - 20
+        let above = layoutSidebar(x: sideX, y: sideTop, width: sideW)
         var y = sideTop
         switch page {
         case .theme:
@@ -691,6 +698,8 @@ final class SettingsPanel: NSObject {
         case .shot:
             y = layoutShot(text: text, y: y)
         }
+        let sideBottom = pinUpdates(x: sideX, above: above, width: sideW, pageBottom: y)
+        pourPill()
         let column = max(sideBottom, y)
         place(railLine, NSRect(x: rail, y: sideTop, width: 1, height: max(24, column - sideTop)))
         fitWindow(contentBottom: column + 8)
@@ -703,7 +712,11 @@ final class SettingsPanel: NSObject {
         guard sideButtons.count == 7 else { return y }
         let island = sideButtons[0]
         let children = sideButtons.filter { $0.rowTag >= 0 && SettingsPage(rawValue: $0.rowTag)?.underIsland == true }
-        let rest = sideButtons.filter { $0.rowTag >= 0 && SettingsPage(rawValue: $0.rowTag)?.underIsland != true }
+        let rest = sideButtons.filter {
+            $0.rowTag >= 0
+                && $0.rowTag != SettingsPage.updates.rawValue
+                && SettingsPage(rawValue: $0.rowTag)?.underIsland != true
+        }
         island.textInset = 12
         place(island, NSRect(x: x, y: y, width: width, height: row))
         place(chevron, NSRect(x: x + width - 26, y: y + (row - 14) / 2, width: 14, height: 14))
@@ -726,8 +739,22 @@ final class SettingsPanel: NSObject {
             place(button, NSRect(x: x, y: cursor, width: width, height: row))
             cursor += row + gap
         }
-        pourPill()
-        return cursor + 8
+        return cursor
+    }
+
+    /// «Обновления» всегда у нижнего края окна, остальные пункты остаются сверху.
+    private func pinUpdates(x: CGFloat, above: CGFloat, width: CGFloat, pageBottom: CGFloat) -> CGFloat {
+        guard let updates = sideButtons.first(where: { $0.rowTag == SettingsPage.updates.rawValue }) else {
+            return above
+        }
+        let row: CGFloat = 34
+        let bottomPad: CGFloat = 18
+        let minFloor: CGFloat = 300 - 28
+        let floor = max(minFloor, above + row + bottomPad, pageBottom + bottomPad)
+        let y = max(above + 8, floor - bottomPad - row)
+        updates.textInset = 12
+        place(updates, NSRect(x: x, y: y, width: width, height: row))
+        return y + row
     }
 
     /// Стрелка остаётся справа в строке. Поворот слоя уносил её влево: якорь вида в нуле.
@@ -885,7 +912,7 @@ final class SettingsPanel: NSObject {
             y = layoutInstalled(soundReady, soundCheck, text: text, y: y)
         } else {
             soundInstall.isEnabled = true
-            soundInstall.frame = NSRect(x: text.minX, y: y, width: soundInstall.frame.width + 8, height: 28)
+            soundInstall.frame = NSRect(x: text.minX, y: y, width: buttonWidth(soundInstall), height: 28)
             y += 34
             if !soundNote.stringValue.isEmpty {
                 let noteHeight = measuredHeight(soundNote.stringValue, width: text.width, font: soundNote.font, limit: 48)
@@ -1045,7 +1072,7 @@ final class SettingsPanel: NSObject {
         nativeState.frame = NSRect(x: text.maxX - 88, y: y, width: 88, height: 16)
         y += 22
         if !nativeButton.isHidden {
-            nativeButton.frame = NSRect(x: text.minX, y: y, width: nativeButton.frame.width + 8, height: 28)
+            nativeButton.frame = NSRect(x: text.minX, y: y, width: buttonWidth(nativeButton), height: 28)
             y += 34
         }
         if !nativeNote.stringValue.isEmpty {
@@ -1060,8 +1087,8 @@ final class SettingsPanel: NSObject {
         var y = y
         versionLabel.frame = NSRect(x: text.minX, y: y, width: text.width, height: 16)
         y += 24
-        let updateWidth = updateButton.frame.width + 8
-        let restoreWidth = restoreButton.frame.width + 8
+        let updateWidth = buttonWidth(updateButton)
+        let restoreWidth = buttonWidth(restoreButton)
         updateButton.frame = NSRect(x: text.minX, y: y, width: updateWidth, height: 28)
         let restoreX = text.minX + updateWidth + 8
         if restoreX + restoreWidth <= text.maxX {
@@ -1083,7 +1110,7 @@ final class SettingsPanel: NSObject {
             y += height + 8
         }
         if !installButton.isHidden {
-            installButton.frame = NSRect(x: text.minX, y: y, width: installButton.frame.width + 8, height: 28)
+            installButton.frame = NSRect(x: text.minX, y: y, width: buttonWidth(installButton), height: 28)
             y += 36
         }
         return y
