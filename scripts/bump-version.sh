@@ -71,5 +71,16 @@ if note:
     body += note + "\n"
 with open(path, "w", encoding="utf-8") as handle:
     handle.write(body)
+# Коммитим сразу же: иначе обычная ручная сборка оставляет VERSION
+# несохранённым, и следующий клик по «Установить» в самой утке видит
+# «грязную» папку и отказывается обновляться — хотя единственная
+# «правка» была от этого же скрипта.
+git("add", "VERSION")
+commit_code, commit_out = git(
+    "-c", "user.name=Utka Build", "-c", "user.email=build@utka.local",
+    "commit", "-m", f"Версия {bumped}"
+)
+if commit_code != 0:
+    print(commit_out.strip(), file=sys.stderr)
 print(f"номер обновления {work_version} → {bumped}")
 PY
