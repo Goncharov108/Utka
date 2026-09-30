@@ -72,6 +72,11 @@ final class SettingsPanel: NSObject {
     private var pillTarget = NSRect.zero
     private var motionTimer: Timer?
     private var sectionLines: [SectionLine] = []
+    private var libraryLines: [LibraryOfferLine] = []
+    private let libraryButton = NSButton()
+    private let libraryBack = NSButton()
+    private let libraryEmpty = UtkaChrome.label("Пока пусто", size: 13, color: UtkaChrome.dim)
+    private var showingLibrary = false
     private var dragLine: SectionLine?
     private var settlingLine: SectionLine?
     private var dragY: CGFloat = 0
@@ -244,8 +249,20 @@ final class SettingsPanel: NSObject {
             row.removeFromSuperview()
             nest.addSubview(row)
         }
-        sectionLines = IslandSection.order.map { makeSectionLine($0) }
-        sectionLines.forEach { body.addSubview($0) }
+        rebuildSectionLines()
+        mount(libraryButton, title: "Библиотека", action: #selector(libraryClicked))
+        libraryBack.isBordered = false
+        libraryBack.bezelStyle = .shadowlessSquare
+        libraryBack.imagePosition = .imageOnly
+        libraryBack.imageScaling = .scaleProportionallyDown
+        libraryBack.image = utkaSymbol("chevron.left", point: 13, label: "К разделам")
+        libraryBack.toolTip = "К разделам"
+        libraryBack.target = self
+        libraryBack.action = #selector(libraryBackClicked)
+        libraryEmpty.alignment = .center
+        body.addSubview(libraryButton)
+        body.addSubview(libraryBack)
+        body.addSubview(libraryEmpty)
         refreshSectionToggles()
         body.addSubview(nativeTitle)
         body.addSubview(nativeState)
@@ -282,6 +299,7 @@ final class SettingsPanel: NSObject {
         paintSidebar()
         refreshNative()
         NotificationCenter.default.addObserver(self, selector: #selector(lookChanged), name: IslandLook.changed, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(sectionsChanged), name: IslandSection.orderChanged, object: nil)
         paintChrome()
     }
 
@@ -313,6 +331,9 @@ final class SettingsPanel: NSObject {
     }
 
     private func pick(_ next: SettingsPage) {
+        if next == .sections {
+            showLibrary(false)
+        }
         select(next, animated: true)
     }
 
@@ -330,6 +351,9 @@ final class SettingsPanel: NSObject {
         railLine.layer?.backgroundColor = UtkaChrome.dim.withAlphaComponent(0.28).cgColor
         pill.layer?.backgroundColor = IslandLook.accent.withAlphaComponent(0.22).cgColor
         sectionLines.forEach { $0.applyLook() }
+        libraryLines.forEach { $0.applyLook() }
+        libraryEmpty.textColor = UtkaChrome.dim
+        libraryBack.contentTintColor = UtkaChrome.ink
     }
 
     /// Показывает контролы только текущей вкладки.
@@ -364,7 +388,12 @@ final class SettingsPanel: NSObject {
         searchLabel.isHidden = !search
         searchSwitch.isHidden = !search
         let sections = page == .sections
-        sectionLines.forEach { $0.isHidden = !sections }
+        let libraryOpen = sections && showingLibrary
+        sectionLines.forEach { $0.isHidden = !sections || showingLibrary }
+        libraryLines.forEach { $0.isHidden = !libraryOpen }
+        libraryEmpty.isHidden = !libraryOpen || !libraryLines.isEmpty
+        libraryButton.isHidden = !sections || showingLibrary
+        libraryBack.isHidden = !libraryOpen
         let theme = page == .theme
         lookLabel.isHidden = !theme
         lookMode.isHidden = !theme
@@ -789,8 +818,8 @@ final class SettingsPanel: NSObject {
     }
 
     /// Строка раздела, которую можно перетащить. Порядок пишется и на островок.
-    private func makeSectionLine(_ section: IslandSection) -> SectionLine {
-        let line = SectionLine(section: section)
+    private func makeSectionLine(_ slot: SectionSlot) -> SectionLine {
+        let line = SectionLine(slot: slot)
         line.onDrag = { [weak self, weak line] y in
             guard let self, let line else { return }
             self.dragLine = line
@@ -813,18 +842,26 @@ final class SettingsPanel: NSObject {
             self.body.needsLayout = true
         }
         line.onToggle = { [weak self] on in
-            IslandSection.setShown(section, on)
+            SectionBoard.setShown(slot.id, on)
             self?.refreshSectionToggles()
+        }
+        if slot.core == nil {
+            line.onRemove = { [weak self] in
+                SectionBoard.remove(slot.id)
+                self?.rebuildSectionLines()
+                self?.body.needsLayout = true
+            }
         }
         return line
     }
 
-    /// Тумблеры по записи. Последний включённый не даёт себя выключить.
+    /// Тумблеры по записи. Последний включённый не даёт себя выключить и снять.
     private func refreshSectionToggles() {
-        let alone = IslandSection.visible.count <= 1
+        let alone = SectionBoard.visible.count <= 1
         for line in sectionLines {
-            let on = IslandSection.isShown(line.section)
-            line.setShown(on, enabled: !(on && alone))
+            let on = SectionBoard.isShown(line.slot.id)
+            let lastOn = on && alone
+            line.setShown(on, enabled: !lastOn, canRemove: SectionBoard.canRemove(line.slot.id))
         }
     }
 
@@ -836,11 +873,78 @@ final class SettingsPanel: NSObject {
         guard let from = sectionLines.firstIndex(where: { $0 === dragLine }), from != target else { return }
         let line = sectionLines.remove(at: from)
         sectionLines.insert(line, at: target)
-        IslandSection.order = sectionLines.map(\.section)
+        SectionBoard.order = sectionLines.map(\.slot)
     }
 
-    /// Полка, буфер, закрепы и переводчик. Соседи едут к слоту, тянущаяся — за курсором.
+    /// Список поставленных разделов заново. Во время перетаскивания строки не выбрасывает.
+    private func rebuildSectionLines() {
+        guard dragLine == nil else { return }
+        sectionLines.forEach { $0.removeFromSuperview() }
+        sectionShown.removeAll()
+        sectionHome.removeAll()
+        sectionLines = SectionBoard.order.map { makeSectionLine($0) }
+        sectionLines.forEach { body.addSubview($0) }
+        refreshSectionToggles()
+        applyPageVisibility()
+    }
+
+    /// Непоставленные карточки каталога. Пустой каталог оставляет одну строку «Пока пусто».
+    private func rebuildLibraryLines() {
+        libraryLines.forEach { $0.removeFromSuperview() }
+        libraryLines = SectionBoard.offers.map { card in
+            let line = LibraryOfferLine(card: card)
+            line.onInstall = { [weak self] in
+                SectionBoard.install(card.id)
+                self?.rebuildLibraryLines()
+                self?.body.needsLayout = true
+            }
+            body.addSubview(line)
+            return line
+        }
+        applyPageVisibility()
+    }
+
+    /// Библиотека или список разделов. Каталог читается заново при каждом входе.
+    private func showLibrary(_ on: Bool) {
+        showingLibrary = on
+        SectionBoard.reload()
+        if on {
+            rebuildLibraryLines()
+        } else {
+            rebuildSectionLines()
+        }
+        applyPageVisibility()
+        body.needsLayout = true
+    }
+
+    @objc private func libraryClicked() {
+        showLibrary(true)
+    }
+
+    /// Стрелка вверху библиотеки возвращает к списку разделов.
+    @objc private func libraryBackClicked() {
+        showLibrary(false)
+    }
+
+    /// Полоса и список подтягиваются, когда каталог или включение изменились снаружи.
+    @objc private func sectionsChanged() {
+        guard page == .sections, dragLine == nil else { return }
+        if showingLibrary {
+            rebuildLibraryLines()
+        } else {
+            let ids = SectionBoard.order.map(\.id)
+            if ids != sectionLines.map(\.slot.id) {
+                rebuildSectionLines()
+            } else {
+                refreshSectionToggles()
+            }
+        }
+        body.needsLayout = true
+    }
+
+    /// Поставленные разделы и кнопка библиотеки под ними. В библиотеке — карточки, которые ещё не стоят.
     private func layoutSections(text: NSRect, y: CGFloat) -> CGFloat {
+        if showingLibrary { return layoutLibrary(text: text, y: y) }
         sectionOrigin = y
         let row: CGFloat = 40
         let gap: CGFloat = 8
@@ -878,7 +982,38 @@ final class SettingsPanel: NSObject {
         if traveling || abs(lift - liftTarget) > 0.01 {
             kickMotion()
         }
-        return y + CGFloat(sectionLines.count) * pitch
+        let rowsBottom = y + CGFloat(sectionLines.count) * pitch
+        return placeLibraryButton(text: text, y: rowsBottom)
+    }
+
+    /// Карточки каталога под стрелкой. Пустой каталог — одна строка.
+    private func layoutLibrary(text: NSRect, y: CGFloat) -> CGFloat {
+        libraryBack.frame = NSRect(x: text.minX - 6, y: y, width: 28, height: 22)
+        let row: CGFloat = 40
+        let gap: CGFloat = 8
+        var cursor = y + 30
+        if libraryLines.isEmpty {
+            libraryEmpty.frame = NSRect(x: text.minX, y: cursor, width: text.width, height: 22)
+            cursor += 30
+        } else {
+            for (index, line) in libraryLines.enumerated() {
+                line.frame = NSRect(
+                    x: text.minX,
+                    y: cursor + CGFloat(index) * (row + gap),
+                    width: text.width,
+                    height: row
+                )
+            }
+            cursor += CGFloat(libraryLines.count) * (row + gap)
+        }
+        return cursor
+    }
+
+    /// Кнопка под списком. В библиотеке она возвращает к разделам.
+    private func placeLibraryButton(text: NSRect, y: CGFloat) -> CGFloat {
+        let width = buttonWidth(libraryButton)
+        libraryButton.frame = NSRect(x: text.minX, y: y + 4, width: width, height: 28)
+        return y + 40
     }
 
     /// Звук на полосе и плагин.
@@ -1244,20 +1379,22 @@ private final class SidebarGlyph: NSImageView {
 
 /// Строка раздела островка: иконка, имя, тумблер и захват для перестановки.
 private final class SectionLine: NSView {
-    let section: IslandSection
+    let slot: SectionSlot
     var onDrag: ((CGFloat) -> Void)?
     var onDrop: (() -> Void)?
     var onToggle: ((Bool) -> Void)?
+    var onRemove: (() -> Void)?
     private let icon = NSImageView()
     private let titleLabel: NSTextField
     private let grip = NSImageView()
     private let toggle = NSSwitch()
+    private let removeButton = NSButton()
     private var grab: CGFloat = 0
     private var shown = true
 
-    init(section: IslandSection) {
-        self.section = section
-        titleLabel = UtkaChrome.label(section.listTitle, size: 13, weight: .medium)
+    init(slot: SectionSlot) {
+        self.slot = slot
+        titleLabel = UtkaChrome.label(slot.listTitle, size: 13, weight: .medium)
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 8
@@ -1273,18 +1410,24 @@ private final class SectionLine: NSView {
             "shadowPath": still,
             "shadowColor": still
         ]
-        icon.image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: section.listTitle)?
-            .withSymbolConfiguration(.init(pointSize: 15, weight: .medium))
+        icon.image = utkaSymbol(slot.symbol, point: 15, label: slot.listTitle)
         icon.imageScaling = .scaleProportionallyDown
-        grip.image = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: "Перетащить")?
-            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        grip.image = utkaSymbol("line.3.horizontal", point: 12, label: "Перетащить")
         grip.imageScaling = .scaleProportionallyDown
         toggle.target = self
         toggle.action = #selector(toggled)
+        removeButton.isBordered = false
+        removeButton.image = utkaSymbol("minus.circle", point: 13, label: "Снять")
+        removeButton.imageScaling = .scaleProportionallyDown
+        removeButton.toolTip = "Снять"
+        removeButton.target = self
+        removeButton.action = #selector(removeClicked)
+        removeButton.isHidden = slot.core != nil
         addSubview(icon)
         addSubview(titleLabel)
         addSubview(grip)
         addSubview(toggle)
+        addSubview(removeButton)
         applyLook()
     }
 
@@ -1303,10 +1446,11 @@ private final class SectionLine: NSView {
     }
 
     /// Включён — раздел на островке. Последний включённый тумблер не нажимается.
-    func setShown(_ on: Bool, enabled: Bool) {
+    func setShown(_ on: Bool, enabled: Bool, canRemove: Bool) {
         shown = on
         toggle.state = on ? .on : .off
         toggle.isEnabled = enabled
+        removeButton.isEnabled = canRemove
         applyShown()
     }
 
@@ -1314,6 +1458,7 @@ private final class SectionLine: NSView {
     func applyLook() {
         layer?.backgroundColor = UtkaChrome.card.cgColor
         grip.contentTintColor = UtkaChrome.dim
+        removeButton.contentTintColor = UtkaChrome.dim
         applyShown()
     }
 
@@ -1325,6 +1470,10 @@ private final class SectionLine: NSView {
 
     @objc private func toggled() {
         onToggle?(toggle.state == .on)
+    }
+
+    @objc private func removeClicked() {
+        onRemove?()
     }
 
     override func layout() {
@@ -1340,7 +1489,11 @@ private final class SectionLine: NSView {
             height: switchSize.height
         )
         grip.frame = NSRect(x: toggle.frame.minX - 22, y: (bounds.height - 14) / 2, width: 16, height: 14)
-        titleLabel.frame = NSRect(x: 40, y: (bounds.height - 18) / 2, width: max(40, grip.frame.minX - 48), height: 18)
+        if !removeButton.isHidden {
+            removeButton.frame = NSRect(x: grip.frame.minX - 24, y: (bounds.height - 16) / 2, width: 16, height: 16)
+        }
+        let titleStop = removeButton.isHidden ? grip.frame.minX : removeButton.frame.minX
+        titleLabel.frame = NSRect(x: 40, y: (bounds.height - 18) / 2, width: max(40, titleStop - 48), height: 18)
     }
 
     override func resetCursorRects() {
@@ -1384,5 +1537,60 @@ private final class SettingsBody: NSView {
             return
         }
         window?.close()
+    }
+}
+
+/// Карточка каталога, которую ещё не поставили.
+private final class LibraryOfferLine: NSView {
+    var onInstall: (() -> Void)?
+    private let icon = NSImageView()
+    private let titleLabel: NSTextField
+    private let install = NSButton()
+
+    init(card: LibraryCard) {
+        titleLabel = UtkaChrome.label(card.title, size: 13, weight: .medium)
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        icon.image = utkaSymbol(card.symbol, point: 15, label: card.title)
+        icon.imageScaling = .scaleProportionallyDown
+        install.title = "Поставить"
+        install.bezelStyle = .rounded
+        install.font = UtkaChrome.font(12, weight: .medium)
+        install.target = self
+        install.action = #selector(installClicked)
+        addSubview(icon)
+        addSubview(titleLabel)
+        addSubview(install)
+        applyLook()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    /// Подтягивает строку под текущую тему.
+    func applyLook() {
+        layer?.backgroundColor = UtkaChrome.card.cgColor
+        icon.contentTintColor = UtkaChrome.ink
+        titleLabel.textColor = UtkaChrome.ink
+    }
+
+    @objc private func installClicked() {
+        onInstall?()
+    }
+
+    override func layout() {
+        super.layout()
+        let side = min(18, bounds.height - 8)
+        icon.frame = NSRect(x: 12, y: (bounds.height - side) / 2, width: side, height: side)
+        install.sizeToFit()
+        var buttonSize = install.frame.size
+        if buttonSize.width < 8 { buttonSize = NSSize(width: 92, height: 24) }
+        install.frame = NSRect(
+            x: bounds.width - 12 - buttonSize.width,
+            y: (bounds.height - buttonSize.height) / 2,
+            width: buttonSize.width,
+            height: buttonSize.height
+        )
+        titleLabel.frame = NSRect(x: 40, y: (bounds.height - 18) / 2, width: max(40, install.frame.minX - 48), height: 18)
     }
 }
