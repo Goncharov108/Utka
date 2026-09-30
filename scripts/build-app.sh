@@ -2,7 +2,10 @@
 # Собирает Utka.app без Xcode: универсальный бинарник и иконка утки.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-bash "$ROOT/scripts/bump-version.sh"
+# Кнопка «Установить» передаёт UTKA_INSTALL=1, чтобы номер в VERSION сам не рос.
+if [ "${UTKA_INSTALL:-}" != "1" ]; then
+  bash "$ROOT/scripts/bump-version.sh"
+fi
 APP_VERSION="$(head -n 1 "$ROOT/VERSION" | tr -d '[:space:]')"
 if ! [[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "В файле VERSION нужны три числа в первой строке, сейчас: ${APP_VERSION:-пусто}" >&2
@@ -49,16 +52,38 @@ write_icon() {
   iconutil -c icns "$set" -o "$dest"
   rm -rf "$(dirname "$set")"
 }
-APP="$ROOT/Utka.app"
+# Шаг полоски только у кнопки «Установить». Обычная сборка эти строки не пишет.
+utka_step() {
+  [ "${UTKA_INSTALL:-}" = "1" ] || return 0
+  printf 'UTKA_STEP %s\n' "$1"
+}
+LIVE="$ROOT/Utka.app"
+if [ "${UTKA_INSTALL:-}" = "1" ]; then
+  case "${UTKA_STAGE:-}" in
+    */Utka.next.app) ;;
+    *)
+      echo "нет папки для сборки" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$UTKA_STAGE" = "$LIVE" ]; then
+    echo "нет папки для сборки" >&2
+    exit 1
+  fi
+  APP="$UTKA_STAGE"
+else
+  APP="$LIVE"
+fi
 # Предыдущая утка только на этом Маке. В репозиторий не кладётся.
 # Сначала полная копия во временную папку: пустой Utka.app предыдущую не затирает.
 PREVIOUS="$HOME/Library/Application Support/Utka/PreviousUtka.app"
-if [ -x "$APP/Contents/MacOS/Utka" ]; then
+if [ -x "$LIVE/Contents/MacOS/Utka" ]; then
+  utka_step previous
   support="$HOME/Library/Application Support/Utka"
   stage="$support/PreviousUtka.staging.app"
   mkdir -p "$support"
   rm -rf "$stage"
-  ditto "$APP" "$stage"
+  ditto "$LIVE" "$stage"
   if [ -x "$stage/Contents/MacOS/Utka" ]; then
     rm -rf "$PREVIOUS"
     mv "$stage" "$PREVIOUS"
@@ -80,6 +105,11 @@ for arch in arm64 x86_64; do
   play="$BIN_DIR/UtkaPlay-$arch.o"
   out="$BIN_DIR/Utka-$arch"
   driver="$BIN_DIR/UtkaAudio-$arch"
+  step_name=arm64
+  if [ "$arch" = "x86_64" ]; then
+    step_name=intel
+  fi
+  utka_step "$step_name"
   if clang -c -O2 -target "${arch}-apple-macosx13.3" \
     -I "$ROOT/AudioDriver" \
     "$ROOT/Sources/UtkaPlay.c" \
@@ -94,6 +124,7 @@ for arch in arm64 x86_64; do
     BINS+=("$out")
   else
     echo "сборка $arch пропущена" >&2
+    utka_step "skip $step_name"
   fi
   if clang -bundle -O2 -target "${arch}-apple-macosx13.3" \
     -framework CoreAudio -framework CoreFoundation \
@@ -160,6 +191,7 @@ with open(path, "wb") as handle:
     plistlib.dump(data, handle, fmt=plistlib.FMT_XML)
 '
 # Одна и та же подпись на каждую сборку, иначе macOS забывает разрешение и режет окна.
+utka_step sign
 if ! security find-certificate -c "Utka Local" >/dev/null 2>&1; then
   CERT_DIR="$(mktemp -d)"
   cat > "$CERT_DIR/cert.cnf" << 'EOF'

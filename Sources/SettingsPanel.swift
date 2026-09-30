@@ -587,40 +587,19 @@ final class SettingsPanel: NSObject {
         }
     }
 
-    /// Забирает общий main, собирает утку и открывает её заново.
+    /// Открывает окно установки. Сборка идёт там, пока утка жива.
     @objc private func installUpdate() {
         guard !installing, !restoring, canInstall else { return }
         installing = true
         installButton.isEnabled = false
         updateButton.isEnabled = false
         restoreButton.isEnabled = false
-        updateLine.stringValue = "Забираю общий main…"
-        body.needsLayout = true
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let error = AppUpdate.prepareInstall()
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if let error {
-                    self.installing = false
-                    self.installButton.isEnabled = true
-                    self.updateButton.isEnabled = true
-                    self.restoreButton.isEnabled = true
-                    self.updateLine.stringValue = error
-                    self.body.needsLayout = true
-                    return
-                }
-                guard AppUpdate.startRebuild() else {
-                    self.installing = false
-                    self.installButton.isEnabled = true
-                    self.updateButton.isEnabled = true
-                    self.restoreButton.isEnabled = true
-                    self.updateLine.stringValue = "Не удалось начать сборку"
-                    self.body.needsLayout = true
-                    return
-                }
-                self.updateLine.stringValue = "Собираю и открою заново"
-                NSApp.terminate(nil)
-            }
+        InstallWindow.present(over: window) { [weak self] in
+            guard let self else { return }
+            self.installing = false
+            self.installButton.isEnabled = self.canInstall
+            self.updateButton.isEnabled = true
+            self.restoreButton.isEnabled = true
         }
     }
 
