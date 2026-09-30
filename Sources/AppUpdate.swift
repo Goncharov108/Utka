@@ -24,9 +24,15 @@ enum AppUpdate {
         }
         let current = installedVersion()
         let currentLabel = current.map(withVee) ?? "номер сборки неизвестен"
-        if current == remoteNote.version {
+        // Сравниваем как числа, а не строки: иначе после ручной пересборки
+        // локальный номер может обогнать main, и «Новая v1.0.3» при уже
+        // установленной v1.0.4 выглядело бы так, будто есть обновление.
+        guard let current else {
+            return Report(text: "Номер сборки неизвестен, сверить не с чем", canInstall: false)
+        }
+        guard isNewer(remoteNote.version, than: current) else {
             return Report(
-                text: "Сейчас \(currentLabel)\nВ общем main \(withVee(remoteNote.version))\nСтавить нечего",
+                text: "Сейчас \(currentLabel)\nОбновлений нет — у вас последняя версия",
                 canInstall: false
             )
         }
@@ -124,6 +130,21 @@ enum AppUpdate {
     /// Номер в настройках: v1.0.0.
     private static func withVee(_ version: String) -> String {
         "v\(version)"
+    }
+
+    /// Три числа как кортеж, чтобы v1.0.10 не проиграл v1.0.9 из-за строкового сравнения.
+    private static func triple(_ version: String) -> (Int, Int, Int)? {
+        let parts = version.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 3 else { return nil }
+        return (parts[0], parts[1], parts[2])
+    }
+
+    /// true — на main действительно более новый номер, а не такой же или старее.
+    private static func isNewer(_ remote: String, than current: String) -> Bool {
+        guard let remoteTriple = triple(remote), let currentTriple = triple(current) else {
+            return remote != current
+        }
+        return remoteTriple > currentTriple
     }
 
     /// Копия утки, которую сборка оставляет перед заменой.
