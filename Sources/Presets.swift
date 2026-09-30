@@ -66,6 +66,21 @@ final class PresetsModel {
         onChange?()
     }
 
+    /// Меняет запись местами с соседней того же вида. Чужой вид между ними остаётся на своём индексе.
+    func move(id: String, up: Bool) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        let kind = items[index].kind
+        let step = up ? -1 : 1
+        var neighbor = index + step
+        while items.indices.contains(neighbor), items[neighbor].kind != kind {
+            neighbor += step
+        }
+        guard items.indices.contains(neighbor) else { return }
+        items.swapAt(index, neighbor)
+        save()
+        onChange?()
+    }
+
     func url(for preset: Preset) -> URL? {
         let name = (preset.path as NSString?)?.lastPathComponent ?? preset.title
         return BookmarkStore.locate(bookmark: preset.bookmark, path: preset.path, name: name)
@@ -142,6 +157,7 @@ final class PresetsView: NSView {
     private var rows: [TextRowView] = []
     private var expanded: Set<String> = []
     private var tab: PresetsTab = .notes
+    private var removePrompt: RemovePrompt?
 
     init(model: PresetsModel) {
         self.model = model
@@ -265,21 +281,37 @@ final class PresetsView: NSView {
     private func rebuild() {
         fileDocument.subviews.forEach { $0.removeFromSuperview() }
         textDocument.subviews.forEach { $0.removeFromSuperview() }
-        cards = model.files.map { preset in
+        let files = model.files
+        cards = files.enumerated().map { index, preset in
             let card = FileCardView()
             card.show(url: model.url(for: preset), title: preset.title)
             card.consumeOnDrop = false
             card.onDrag = { [weak self] active in self?.onDrag?(active) }
-            card.onRemove = { [weak self] in self?.model.remove(id: preset.id) }
+            card.onRemove = { [weak self] in self?.askRemove(preset) }
+            card.showsOrder = files.count > 1
+            if index > 0 {
+                card.onMoveUp = { [weak self] in self?.model.move(id: preset.id, up: true) }
+            }
+            if index < files.count - 1 {
+                card.onMoveDown = { [weak self] in self?.model.move(id: preset.id, up: false) }
+            }
             if let url = model.url(for: preset) {
                 card.onEdit = { ShotEditor.open(url: url) }
             }
             fileDocument.addSubview(card)
             return card
         }
-        rows = model.texts.map { preset in
+        let texts = model.texts
+        rows = texts.enumerated().map { index, preset in
             let row = TextRowView()
             row.isExpanded = expanded.contains(preset.id)
+            row.showsOrder = texts.count > 1
+            if index > 0 {
+                row.onMoveUp = { [weak self] in self?.model.move(id: preset.id, up: true) }
+            }
+            if index < texts.count - 1 {
+                row.onMoveDown = { [weak self] in self?.model.move(id: preset.id, up: false) }
+            }
             row.show(title: preset.title, detail: oneLine(preset.body ?? ""), body: preset.body ?? "")
             row.onClick = { [weak self] in
                 guard let body = preset.body else { return }
@@ -295,7 +327,7 @@ final class PresetsView: NSView {
                 row.isExpanded = open
                 self.applyLayout()
             }
-            row.onDelete = { [weak self] in self?.model.remove(id: preset.id) }
+            row.onDelete = { [weak self] in self?.askRemove(preset) }
             textDocument.addSubview(row)
             return row
         }
@@ -353,6 +385,27 @@ final class PresetsView: NSView {
         applyLayout()
     }
 
+    /// Спрашивает и только потом снимает запись. Файл на диске не стирает.
+    private func askRemove(_ preset: Preset) {
+        guard removePrompt == nil else { return }
+        let text = preset.kind == "file"
+            ? "Убрать запись из утки? Файл на диске останется."
+            : "Убрать заметку из списка?"
+        onDrag?(true)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let prompt = RemovePrompt(text: text)
+            self.removePrompt = prompt
+            prompt.onChoose = { [weak self] drop in
+                self?.removePrompt = nil
+                self?.onDrag?(false)
+                guard drop else { return }
+                self?.model.remove(id: preset.id)
+            }
+            prompt.show(over: self.window)
+        }
+    }
+
     @objc private func addText() {
         let body = bodyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return }
@@ -376,5 +429,143 @@ final class PresetsView: NSView {
         tabControl.selectedSegment = tab.rawValue
         applyLayout()
         return true
+    }
+}
+
+/// Короткое окно поверх островка: убрать запись или оставить.
+private final class RemovePrompt: NSObject {
+    var onChoose: ((Bool) -> Void)?
+
+    private let window: RemoveWindow
+    private let card = UtkaPanelChrome()
+    private let message = NSTextField(wrappingLabelWithString: "")
+    private let dropButton = NSButton()
+    private let keepButton = NSButton()
+    private var escapeMonitor: Any?
+    private var lookToken: NSObjectProtocol?
+    private var closed = false
+
+    init(text: String) {
+        window = RemoveWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 140),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        super.init()
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.hidesOnDeactivate = false
+        window.isMovable = false
+        window.cancel = { [weak self] in self?.finish(drop: false) }
+
+        window.contentView = card
+
+        message.stringValue = text
+        message.font = UtkaChrome.font(13)
+        message.maximumNumberOfLines = 3
+        message.lineBreakMode = .byWordWrapping
+        message.drawsBackground = false
+        message.isBezeled = false
+        message.isEditable = false
+        message.isSelectable = false
+        card.addSubview(message)
+
+        style(dropButton, title: "Убрать", action: #selector(dropTapped))
+        style(keepButton, title: "Оставить", action: #selector(keepTapped))
+        card.addSubview(dropButton)
+        card.addSubview(keepButton)
+        lookToken = UtkaChrome.track(window) { [weak self] in
+            self?.applyLook()
+        }
+    }
+
+    /// Текст и кнопки под текущий вид. Фон карточки обновляет само стекло.
+    private func applyLook() {
+        card.apply()
+        message.textColor = UtkaChrome.ink
+        dropButton.appearance = window.appearance
+        keepButton.appearance = window.appearance
+    }
+
+    /// Ставит карточку по центру островка, не включая модальный режим приложения.
+    func show(over host: NSWindow?) {
+        let cardW: CGFloat = 360
+        let cardH: CGFloat = 140
+        let area = host?.frame ?? NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: cardW, height: cardH)
+        window.setFrame(NSRect(
+            x: area.midX - cardW / 2,
+            y: area.midY - cardH / 2,
+            width: cardW,
+            height: cardH
+        ), display: false)
+        layoutCard()
+        window.orderFrontRegardless()
+        window.makeKey()
+        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53 else { return event }
+            self?.finish(drop: false)
+            return nil
+        }
+    }
+
+    private func style(_ button: NSButton, title: String, action: Selector) {
+        button.title = title
+        button.bezelStyle = .rounded
+        button.font = UtkaChrome.font(13, weight: .medium)
+        button.target = self
+        button.action = action
+    }
+
+    private func layoutCard() {
+        let cardW: CGFloat = 360
+        let pad: CGFloat = 16
+        message.frame = NSRect(x: pad, y: 58, width: cardW - pad * 2, height: 64)
+        let buttonW: CGFloat = 104
+        let buttonH: CGFloat = 28
+        keepButton.frame = NSRect(x: cardW - pad - buttonW, y: 16, width: buttonW, height: buttonH)
+        dropButton.frame = NSRect(x: keepButton.frame.minX - 8 - buttonW, y: 16, width: buttonW, height: buttonH)
+    }
+
+    @objc private func dropTapped() { finish(drop: true) }
+    @objc private func keepTapped() { finish(drop: false) }
+
+    /// drop — снять запись. Иначе оставить как было.
+    private func finish(drop: Bool) {
+        guard !closed else { return }
+        closed = true
+        if let escapeMonitor {
+            NSEvent.removeMonitor(escapeMonitor)
+            self.escapeMonitor = nil
+        }
+        if let lookToken {
+            NotificationCenter.default.removeObserver(lookToken)
+            self.lookToken = nil
+        }
+        window.orderOut(nil)
+        onChoose?(drop)
+    }
+}
+
+/// Безрамочное окно вопроса. Escape ничего не удаляет.
+private final class RemoveWindow: NSWindow {
+    var cancel: (() -> Void)?
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+
+    override func cancelOperation(_ sender: Any?) {
+        cancel?()
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 {
+            cancel?()
+            return
+        }
+        super.keyDown(with: event)
     }
 }

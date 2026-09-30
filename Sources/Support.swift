@@ -224,6 +224,58 @@ enum UtkaChrome {
         field.maximumNumberOfLines = 1
         return field
     }
+
+    /// Окно берёт текущий вид и перекрашивается в тот же момент, что и островок. Токен снять при закрытии.
+    static func track(_ window: NSWindow, repaint: @escaping () -> Void) -> NSObjectProtocol {
+        let apply = { [weak window] in
+            window?.appearance = IslandLook.appearance
+            repaint()
+        }
+        apply()
+        return NotificationCenter.default.addObserver(
+            forName: IslandLook.changed,
+            object: nil,
+            queue: nil
+        ) { _ in
+            apply()
+        }
+    }
+}
+
+/// Фон окна: стекло и вуаль капли. Сам перекрашивается при смене темы.
+final class UtkaPanelChrome: NSVisualEffectView {
+    private let veil = NSView()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        blendingMode = .behindWindow
+        state = .active
+        wantsLayer = true
+        layer?.cornerRadius = 14
+        layer?.masksToBounds = true
+        veil.wantsLayer = true
+        addSubview(veil)
+        NotificationCenter.default.addObserver(self, selector: #selector(apply), name: IslandLook.changed, object: nil)
+        apply()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        veil.frame = bounds
+        if subviews.first !== veil {
+            addSubview(veil, positioned: .below, relativeTo: nil)
+        }
+    }
+
+    /// Материал и плотность вуали как у капли.
+    @objc func apply() {
+        material = IslandLook.dark ? .hudWindow : .menu
+        appearance = IslandLook.appearance
+        window?.appearance = IslandLook.appearance
+        veil.layer?.backgroundColor = IslandLook.veil.cgColor
+    }
 }
 
 /// Документ списка, ноль сверху.
@@ -264,12 +316,29 @@ func oneLine(_ text: String, limit: Int = 80) -> String {
 }
 
 /// Карточка файла: превью, имя, вытаскивание наружу, двойной щелчок открывает файл.
+/// Кнопка «выше» или «ниже». Пока порядок не включён, её не видно.
+private func prepareOrder(_ button: NSButton, symbol: String, tip: String, target: AnyObject, action: Selector) {
+    button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)?
+        .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+    button.imagePosition = .imageOnly
+    button.isBordered = false
+    button.contentTintColor = UtkaChrome.dim
+    button.toolTip = tip
+    button.target = target
+    button.action = action
+    button.isHidden = true
+}
+
 final class FileCardView: NSView, NSDraggingSource {
     var fileURL: URL?
     var consumeOnDrop = false
     var onRemove: (() -> Void)?
     var onDrag: ((Bool) -> Void)?
     var onEdit: (() -> Void)? { didSet { updatePencil() } }
+    var onMoveUp: (() -> Void)? { didSet { refreshOrder() } }
+    var onMoveDown: (() -> Void)? { didSet { refreshOrder() } }
+    /// Кнопки порядка. У полки выключено, драг файла наружу не меняется.
+    var showsOrder = false { didSet { refreshOrder() } }
     /// Полка: драг начался, это имя нельзя сразу забирать со стола.
     var onExportBegan: ((String) -> Void)?
     /// Полка: драг отменён, защиту имени можно снять.
@@ -281,6 +350,8 @@ final class FileCardView: NSView, NSDraggingSource {
     private let nameLabel = UtkaChrome.label("", size: 11, color: UtkaChrome.dim)
     private let removeButton = NSButton()
     private let editButton = NSButton()
+    private let upButton = NSButton()
+    private let downButton = NSButton()
     private var didDrag = false
     private var dragName: String?
     private var lastClickAt = Date.distantPast
@@ -311,10 +382,14 @@ final class FileCardView: NSView, NSDraggingSource {
         editButton.target = self
         editButton.action = #selector(editTapped)
         editButton.isHidden = true
+        prepareOrder(upButton, symbol: "chevron.up", tip: "Выше", target: self, action: #selector(moveUpTapped))
+        prepareOrder(downButton, symbol: "chevron.down", tip: "Ниже", target: self, action: #selector(moveDownTapped))
         addSubview(iconView)
         addSubview(nameLabel)
         addSubview(removeButton)
         addSubview(editButton)
+        addSubview(upButton)
+        addSubview(downButton)
         NotificationCenter.default.addObserver(self, selector: #selector(retintCard), name: IslandLook.changed, object: nil)
         retintCard()
     }
@@ -325,6 +400,18 @@ final class FileCardView: NSView, NSDraggingSource {
         nameLabel.textColor = UtkaChrome.dim
         removeButton.contentTintColor = UtkaChrome.dim
         editButton.contentTintColor = UtkaChrome.ink
+        upButton.contentTintColor = upButton.isEnabled ? UtkaChrome.dim : UtkaChrome.dim.withAlphaComponent(0.35)
+        downButton.contentTintColor = downButton.isEnabled ? UtkaChrome.dim : UtkaChrome.dim.withAlphaComponent(0.35)
+    }
+
+    /// Показывает порядок только у заготовок. Крайние направления тусклые.
+    private func refreshOrder() {
+        upButton.isHidden = !showsOrder
+        downButton.isHidden = !showsOrder
+        upButton.isEnabled = onMoveUp != nil
+        downButton.isEnabled = onMoveDown != nil
+        retintCard()
+        needsLayout = true
     }
 
     required init?(coder: NSCoder) { nil }
@@ -354,17 +441,21 @@ final class FileCardView: NSView, NSDraggingSource {
     override func layout() {
         super.layout()
         let labelH: CGFloat = 18
+        let orderPad: CGFloat = showsOrder ? 18 : 0
         nameLabel.frame = NSRect(x: 6, y: 6, width: bounds.width - 12, height: labelH)
-        iconView.frame = NSRect(x: 18, y: labelH + 8, width: bounds.width - 36, height: bounds.height - labelH - 28)
+        iconView.frame = NSRect(x: 18, y: labelH + 8 + orderPad, width: bounds.width - 36, height: max(12, bounds.height - labelH - 28 - orderPad))
         removeButton.frame = NSRect(x: bounds.width - 22, y: bounds.height - 20, width: 18, height: 18)
         editButton.frame = NSRect(x: 4, y: bounds.height - 20, width: 18, height: 18)
+        upButton.frame = NSRect(x: 4, y: 26, width: 16, height: 16)
+        downButton.frame = NSRect(x: 22, y: 26, width: 16, height: 16)
     }
 
     /// Щелчок по превью и имени идёт в карточку. Крестик и карандаш остаются кнопками.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
-        if hit === removeButton || hit === editButton { return hit }
+        if hit === removeButton || hit === editButton || hit === upButton || hit === downButton { return hit }
         if hit.isDescendant(of: removeButton) || hit.isDescendant(of: editButton) { return hit }
+        if hit.isDescendant(of: upButton) || hit.isDescendant(of: downButton) { return hit }
         return self
     }
 
@@ -424,6 +515,14 @@ final class FileCardView: NSView, NSDraggingSource {
     @objc private func editTapped() {
         onEdit?()
     }
+
+    @objc private func moveUpTapped() {
+        onMoveUp?()
+    }
+
+    @objc private func moveDownTapped() {
+        onMoveDown?()
+    }
 }
 
 /// Текст заметки: выделение мышью держит островок открытым, пока кнопка зажата.
@@ -445,6 +544,10 @@ final class TextRowView: NSView {
     var onClick: (() -> Void)?
     var onDelete: (() -> Void)?
     var onToggle: (() -> Void)?
+    var onMoveUp: (() -> Void)? { didSet { refreshOrder() } }
+    var onMoveDown: (() -> Void)? { didSet { refreshOrder() } }
+    /// Кнопки порядка. У буфера выключено, строка остаётся прежней.
+    var showsOrder = false { didSet { refreshOrder() } }
     var onCopySelection: ((String) -> Void)?
     var onSelecting: ((Bool) -> Void)? {
         didSet { textView.onSelecting = onSelecting }
@@ -461,6 +564,8 @@ final class TextRowView: NSView {
     private let deleteButton = NSButton()
     private let copyButton = NSButton()
     private let expandButton = NSButton()
+    private let upButton = NSButton()
+    private let downButton = NSButton()
     private let selectionButton = NSButton()
     private let collapseButton = NSButton()
     private let textScroll = NSScrollView()
@@ -479,6 +584,8 @@ final class TextRowView: NSView {
         deleteButton.action = #selector(deleteTapped)
         styleIcon(copyButton, symbol: "doc.on.doc", tip: "Копировать всё", action: #selector(copyTapped))
         styleIcon(expandButton, symbol: "chevron.down", tip: "Раскрыть", action: #selector(toggleTapped))
+        prepareOrder(upButton, symbol: "chevron.up", tip: "Выше", target: self, action: #selector(moveUpTapped))
+        prepareOrder(downButton, symbol: "chevron.down", tip: "Ниже", target: self, action: #selector(moveDownTapped))
         selectionButton.title = "Копировать выделенное"
         selectionButton.bezelStyle = .rounded
         selectionButton.controlSize = .small
@@ -512,6 +619,8 @@ final class TextRowView: NSView {
         addSubview(copyButton)
         addSubview(expandButton)
         addSubview(deleteButton)
+        addSubview(upButton)
+        addSubview(downButton)
         addSubview(textScroll)
         addSubview(selectionButton)
         addSubview(collapseButton)
@@ -528,6 +637,8 @@ final class TextRowView: NSView {
         deleteButton.contentTintColor = UtkaChrome.dim
         copyButton.contentTintColor = UtkaChrome.dim
         expandButton.contentTintColor = isExpanded ? UtkaChrome.ink : UtkaChrome.dim
+        upButton.contentTintColor = upButton.isEnabled ? UtkaChrome.dim : UtkaChrome.dim.withAlphaComponent(0.35)
+        downButton.contentTintColor = downButton.isEnabled ? UtkaChrome.dim : UtkaChrome.dim.withAlphaComponent(0.35)
         textView.textColor = UtkaChrome.ink
         textView.insertionPointColor = UtkaChrome.ink
         textView.selectedTextAttributes = [.backgroundColor: UtkaChrome.dim]
@@ -567,14 +678,28 @@ final class TextRowView: NSView {
         needsLayout = true
     }
 
+    /// Показывает порядок только у заметок. Крайние направления тусклые.
+    private func refreshOrder() {
+        upButton.isHidden = !showsOrder
+        downButton.isHidden = !showsOrder
+        upButton.isEnabled = onMoveUp != nil
+        downButton.isEnabled = onMoveDown != nil
+        retintRow()
+        needsLayout = true
+    }
+
     override func layout() {
         super.layout()
         let head = TextRowView.collapsedHeight
         let top = bounds.height - head
-        deleteButton.frame = NSRect(x: bounds.width - 28, y: top + (head - 18) / 2, width: 22, height: 18)
-        expandButton.frame = NSRect(x: bounds.width - 54, y: top + (head - 18) / 2, width: 22, height: 18)
-        copyButton.frame = NSRect(x: bounds.width - 80, y: top + (head - 18) / 2, width: 22, height: 18)
-        let textW = bounds.width - 96
+        let mid = top + (head - 18) / 2
+        deleteButton.frame = NSRect(x: bounds.width - 28, y: mid, width: 22, height: 18)
+        expandButton.frame = NSRect(x: bounds.width - 54, y: mid, width: 22, height: 18)
+        copyButton.frame = NSRect(x: bounds.width - 80, y: mid, width: 22, height: 18)
+        let orderShift: CGFloat = showsOrder ? 52 : 0
+        upButton.frame = NSRect(x: bounds.width - 132, y: mid, width: 22, height: 18)
+        downButton.frame = NSRect(x: bounds.width - 106, y: mid, width: 22, height: 18)
+        let textW = bounds.width - 96 - orderShift
         if isExpanded || detailLabel.isHidden {
             titleLabel.frame = NSRect(x: 10, y: top + (head - 18) / 2, width: textW, height: 18)
         } else {
@@ -593,7 +718,8 @@ final class TextRowView: NSView {
     override func mouseUp(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         guard bounds.contains(point), point.y >= bounds.height - TextRowView.collapsedHeight else { return }
-        guard ![deleteButton, copyButton, expandButton].contains(where: { $0.frame.contains(point) }) else { return }
+        let controls = [deleteButton, copyButton, expandButton, upButton, downButton]
+        guard !controls.contains(where: { !$0.isHidden && $0.frame.contains(point) }) else { return }
         flash()
         onClick?()
     }
@@ -624,6 +750,14 @@ final class TextRowView: NSView {
 
     @objc private func deleteTapped() {
         onDelete?()
+    }
+
+    @objc private func moveUpTapped() {
+        onMoveUp?()
+    }
+
+    @objc private func moveDownTapped() {
+        onMoveDown?()
     }
 }
 

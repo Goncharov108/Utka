@@ -31,10 +31,24 @@ enum IslandBar {
     }
 }
 private enum SettingsPage: Int {
-    case island
-    case translate
-    case updates
-    case shot
+    case theme, sections, sound, search, shot, translate, updates
+
+    var title: String {
+        switch self {
+        case .theme: return "Островок"
+        case .sections: return "Разделы"
+        case .sound: return "Звук"
+        case .search: return "Поиск"
+        case .shot: return "Скрин"
+        case .translate: return "Перевод"
+        case .updates: return "Обновления"
+        }
+    }
+
+    /// Пункты, которые выезжают из «Островка». Сама тема к ним не относится.
+    var underIsland: Bool {
+        self == .sections || self == .sound || self == .search
+    }
 }
 
 /// Окно настроек. Открывается кликом по утке на островке.
@@ -47,8 +61,32 @@ final class SettingsPanel: NSObject {
     private let window: NSWindow
     private let body = SettingsBody()
     private let titleLabel = UtkaChrome.label("Настройки", size: 18, weight: .semibold)
-    private var tabButtons: [NSButton] = []
-    private var page: SettingsPage = .island
+    private let railLine = NSView()
+    private let chevron = SidebarGlyph()
+    private let chevronMark: NSImage = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Подменю островка")?
+        .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold)) ?? NSImage()
+    private let nest = FlippedView()
+    private let pill = NSView()
+    private var sideButtons: [MenuRow] = []
+    private var pillRect = NSRect.zero
+    private var pillTarget = NSRect.zero
+    private var motionTimer: Timer?
+    private var sectionLines: [SectionLine] = []
+    private var dragLine: SectionLine?
+    private var settlingLine: SectionLine?
+    private var dragY: CGFloat = 0
+    private var sectionOrigin: CGFloat = 0
+    private var sectionHome: [ObjectIdentifier: CGFloat] = [:]
+    private var sectionShown: [ObjectIdentifier: CGFloat] = [:]
+    private var lift: CGFloat = 0
+    private var liftTarget: CGFloat = 0
+    private var page: SettingsPage = .theme
+    /// 0 — подменю спрятано, 1 — раскрыто. Между ними кадры таймера.
+    private var reveal: CGFloat = 1
+    private var revealFrom: CGFloat = 1
+    private var revealTarget: CGFloat = 1
+    private var revealBegan = Date()
+    private var layingOut = false
     private let nativeTitle = UtkaChrome.label("Перевод", size: 13, weight: .semibold)
     private let nativeState = UtkaChrome.label("", size: 13, color: UtkaChrome.dim)
     private let nativeButton = NSButton()
@@ -97,7 +135,7 @@ final class SettingsPanel: NSObject {
 
     override init() {
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 460),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 520),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -176,13 +214,39 @@ final class SettingsPanel: NSObject {
             object: NSColorPanel.shared
         )
         refreshIslandSwitches()
+        railLine.wantsLayer = true
+        nest.wantsLayer = true
+        nest.layer?.masksToBounds = true
+        nest.layer?.backgroundColor = NSColor.clear.cgColor
+        quietLayer(nest)
+        titleLabel.autoresizingMask = []
+        pill.wantsLayer = true
+        pill.layer?.cornerRadius = 10
+        quietLayer(pill)
+        chevron.image = chevronMark
+        chevron.imageScaling = .scaleProportionallyDown
+        chevron.contentTintColor = UtkaChrome.dim
+        body.addSubview(pill)
         body.addSubview(titleLabel)
-        tabButtons = [
-            makeTab("Островок", page: .island),
-            makeTab("Скрин", page: .shot),
-            makeTab("Перевод", page: .translate),
-            makeTab("Обновления", page: .updates)
+        body.addSubview(railLine)
+        body.addSubview(nest)
+        body.addSubview(chevron)
+        sideButtons = [
+            makeRow("Островок", tag: -1) { [weak self] in self?.islandClicked() },
+            makeRow(SettingsPage.sections.title, tag: SettingsPage.sections.rawValue) { [weak self] in self?.pick(.sections) },
+            makeRow(SettingsPage.sound.title, tag: SettingsPage.sound.rawValue) { [weak self] in self?.pick(.sound) },
+            makeRow(SettingsPage.search.title, tag: SettingsPage.search.rawValue) { [weak self] in self?.pick(.search) },
+            makeRow(SettingsPage.shot.title, tag: SettingsPage.shot.rawValue) { [weak self] in self?.pick(.shot) },
+            makeRow(SettingsPage.translate.title, tag: SettingsPage.translate.rawValue) { [weak self] in self?.pick(.translate) },
+            makeRow(SettingsPage.updates.title, tag: SettingsPage.updates.rawValue) { [weak self] in self?.pick(.updates) }
         ]
+        for row in sideButtons where row.rowTag >= 0 && SettingsPage(rawValue: row.rowTag)?.underIsland == true {
+            row.removeFromSuperview()
+            nest.addSubview(row)
+        }
+        sectionLines = IslandSection.order.map { makeSectionLine($0) }
+        sectionLines.forEach { body.addSubview($0) }
+        refreshSectionToggles()
         body.addSubview(nativeTitle)
         body.addSubview(nativeState)
         body.addSubview(nativeButton)
@@ -215,7 +279,7 @@ final class SettingsPanel: NSObject {
         body.addSubview(strokeWell)
         body.addSubview(nativeReady)
         body.addSubview(nativeCheck)
-        paintTabs()
+        paintSidebar()
         refreshNative()
         NotificationCenter.default.addObserver(self, selector: #selector(lookChanged), name: IslandLook.changed, object: nil)
         paintChrome()
@@ -237,40 +301,35 @@ final class SettingsPanel: NSObject {
         shotCleanup.state = ShelfModel.deleteShotAfterUse ? .on : .off
         refreshIslandSwitches()
         refreshNative()
-        select(.island)
+        select(.theme, animated: false)
     }
 
-    /// Вкладка без рамки. Белая, когда выбрана.
-    private func makeTab(_ title: String, page: SettingsPage) -> NSButton {
-        let button = NSButton()
-        button.title = title
-        button.tag = page.rawValue
-        button.isBordered = false
-        button.wantsLayer = true
-        button.layer?.cornerRadius = 6
-        button.target = self
-        button.action = #selector(tabClicked(_:))
-        body.addSubview(button)
-        return button
+    /// Строка меню: текст с одним левым краем, без системной кнопки.
+    private func makeRow(_ title: String, tag: Int, click: @escaping () -> Void) -> MenuRow {
+        let row = MenuRow(title: title, rowTag: tag)
+        row.onClick = click
+        body.addSubview(row)
+        return row
     }
 
-    /// Красит выбранную вкладку белым, остальные приглушает.
-    private func paintTabs() {
-        let titles = ["Островок", "Перевод", "Обновления", "Скрин"]
-        for button in tabButtons {
-            let on = button.tag == page.rawValue
-            let title = titles[button.tag]
-            button.title = title
-            button.attributedTitle = NSAttributedString(
-                string: title,
-                attributes: [
-                    .font: UtkaChrome.font(13, weight: on ? .semibold : .medium),
-                    .foregroundColor: on ? IslandLook.accent : UtkaChrome.dim
-                ]
-            )
-            button.layer?.backgroundColor = (on ? IslandLook.accent.withAlphaComponent(0.22) : NSColor.clear).cgColor
-            button.sizeToFit()
+    private func pick(_ next: SettingsPage) {
+        select(next, animated: true)
+    }
+
+    /// Красит подписи. Подсветка живёт отдельно и перетекает сама.
+    private func paintSidebar() {
+        let childOn = page.underIsland
+        for row in sideButtons {
+            let group = row.rowTag < 0
+            let on = group ? page == .theme : row.rowTag == page.rawValue
+            let marked = on || (group && childOn)
+            row.titleLabel.font = UtkaChrome.font(13, weight: marked ? .semibold : .medium)
+            row.titleLabel.textColor = marked ? IslandLook.accent : UtkaChrome.dim
         }
+        chevron.contentTintColor = UtkaChrome.dim
+        railLine.layer?.backgroundColor = UtkaChrome.dim.withAlphaComponent(0.28).cgColor
+        pill.layer?.backgroundColor = IslandLook.accent.withAlphaComponent(0.22).cgColor
+        sectionLines.forEach { $0.applyLook() }
     }
 
     /// Показывает контролы только текущей вкладки.
@@ -292,41 +351,132 @@ final class SettingsPanel: NSObject {
         let shot = page == .shot
         shotCleanupLabel.isHidden = !shot
         shotCleanup.isHidden = !shot
-        let island = page == .island
+        let sound = page == .sound
         let plugged = SoundPlugin.isInstalled
-        soundLabel.isHidden = !island
-        soundSwitch.isHidden = !island
-        soundCaption.isHidden = !island
-        soundInstall.isHidden = !island || plugged
-        soundNote.isHidden = !island || plugged || soundNote.stringValue.isEmpty
-        soundReady.isHidden = !island || !plugged
-        soundCheck.isHidden = !island || !plugged
-        searchLabel.isHidden = !island
-        searchSwitch.isHidden = !island
-        lookLabel.isHidden = !island
-        lookMode.isHidden = !island
-        glassLabel.isHidden = !island
-        glassSlider.isHidden = !island
-        accentLabel.isHidden = !island
-        accentWell.isHidden = !island
-        strokeLabel.isHidden = !island
-        strokeSwitch.isHidden = !island
-        let stroke = island && IslandLook.strokeOn
+        soundLabel.isHidden = !sound
+        soundSwitch.isHidden = !sound
+        soundCaption.isHidden = !sound
+        soundInstall.isHidden = !sound || plugged
+        soundNote.isHidden = !sound || plugged || soundNote.stringValue.isEmpty
+        soundReady.isHidden = !sound || !plugged
+        soundCheck.isHidden = !sound || !plugged
+        let search = page == .search
+        searchLabel.isHidden = !search
+        searchSwitch.isHidden = !search
+        let sections = page == .sections
+        sectionLines.forEach { $0.isHidden = !sections }
+        let theme = page == .theme
+        lookLabel.isHidden = !theme
+        lookMode.isHidden = !theme
+        glassLabel.isHidden = !theme
+        glassSlider.isHidden = !theme
+        accentLabel.isHidden = !theme
+        accentWell.isHidden = !theme
+        strokeLabel.isHidden = !theme
+        strokeSwitch.isHidden = !theme
+        let stroke = theme && IslandLook.strokeOn
         strokeColorLabel.isHidden = !stroke
         strokeWell.isHidden = !stroke
     }
 
-    /// Переключает вкладку и поджимает окно под неё.
-    private func select(_ next: SettingsPage) {
+    /// Переключает пункт меню. Подменю островка при этом доезжает само.
+    private func select(_ next: SettingsPage, animated: Bool) {
         page = next
-        paintTabs()
+        paintSidebar()
         applyPageVisibility()
-        body.needsLayout = true
+        if animated && next.underIsland && reveal < 1 {
+            animateReveal(to: 1)
+        } else {
+            body.needsLayout = true
+        }
     }
 
-    @objc private func tabClicked(_ sender: NSButton) {
-        guard let next = SettingsPage(rawValue: sender.tag) else { return }
-        select(next)
+    /// «Островок» показывает тему. Повторный щелчок по теме складывает подменю.
+    @objc private func islandClicked() {
+        if reveal < 0.98 {
+            page = .theme
+            applyPageVisibility()
+            paintSidebar()
+            animateReveal(to: 1)
+            return
+        }
+        if page != .theme {
+            page = .theme
+            applyPageVisibility()
+            paintSidebar()
+            body.needsLayout = true
+            return
+        }
+        paintSidebar()
+        animateReveal(to: 0)
+    }
+
+    /// Кадры сами: у фонового приложения системный аниматор не тикает и меню дёргается.
+    private func animateReveal(to target: CGFloat) {
+        revealFrom = reveal
+        revealTarget = target
+        revealBegan = Date()
+        kickMotion()
+    }
+
+    /// Подменю и пятно выбора едут одним тактом.
+    private func kickMotion() {
+        guard motionTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            self?.stepMotion(timer)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        motionTimer = timer
+    }
+
+    private func stepMotion(_ timer: Timer) {
+        var moving = false
+        if abs(reveal - revealTarget) > 0.004 {
+            let duration = 0.36
+            let t = min(1, Date().timeIntervalSince(revealBegan) / duration)
+            let eased = 1 - pow(1 - t, 3)
+            reveal = revealFrom + (revealTarget - revealFrom) * CGFloat(eased)
+            if t >= 1 { reveal = revealTarget }
+            moving = abs(reveal - revealTarget) > 0.004
+        }
+        if !pillTarget.isEmpty {
+            let dx = pillTarget.origin.x - pillRect.origin.x
+            let dy = pillTarget.origin.y - pillRect.origin.y
+            let dw = pillTarget.width - pillRect.width
+            let dh = pillTarget.height - pillRect.height
+            if abs(dx) > 0.4 || abs(dy) > 0.4 || abs(dw) > 0.4 || abs(dh) > 0.4 {
+                pillRect.origin.x += dx * 0.2
+                pillRect.origin.y += dy * 0.2
+                pillRect.size.width += dw * 0.2
+                pillRect.size.height += dh * 0.2
+                moving = true
+            } else {
+                pillRect = pillTarget
+            }
+        }
+        if abs(lift - liftTarget) > 0.01 {
+            lift += (liftTarget - lift) * 0.2
+            moving = true
+        } else {
+            lift = liftTarget
+        }
+        for line in sectionLines {
+            let id = ObjectIdentifier(line)
+            guard line !== dragLine, let home = sectionHome[id], var shown = sectionShown[id] else { continue }
+            let dy = home - shown
+            if abs(dy) > 0.4 {
+                shown += dy * 0.2
+                sectionShown[id] = shown
+                moving = true
+            } else {
+                sectionShown[id] = home
+            }
+        }
+        if !moving { settlingLine = nil }
+        body.needsLayout = true
+        guard !moving else { return }
+        timer.invalidate()
+        motionTimer = nil
     }
 
     /// Запоминает, снимать ли свой снимок с полки после переноса.
@@ -509,17 +659,38 @@ final class SettingsPanel: NSObject {
         button.sizeToFit()
     }
 
+    /// Ширина по подписи. Текущий кадр не копится: иначе кнопка растёт каждый проход.
+    private func buttonWidth(_ button: NSButton) -> CGFloat {
+        ceil(button.fittingSize.width) + 8
+    }
+
     private func layoutContents() {
+        guard !layingOut else { return }
+        layingOut = true
+        defer { layingOut = false }
         applyPageVisibility()
         let width = body.bounds.width
-        let text = NSRect(x: 22, y: 0, width: max(120, width - 44), height: 0)
-        var y: CGFloat = 40
-        titleLabel.frame = NSRect(x: text.minX, y: y, width: text.width, height: 24)
-        y += 34
-        y = layoutTabs(x: text.minX, y: y) + 16
+        let rail: CGFloat = 168
+        let pad: CGFloat = 20
+        let chromeTop: CGFloat = 40
+        let titleFont = titleLabel.font ?? UtkaChrome.font(18, weight: .semibold)
+        let titleHeight = ceil(titleFont.ascender - titleFont.descender)
+        titleLabel.frame = NSRect(x: 24, y: chromeTop, width: 132, height: titleHeight)
+        let sideTop: CGFloat = chromeTop + 36
+        let text = NSRect(x: rail + 24, y: 0, width: max(160, width - rail - 24 - pad), height: 0)
+        let sideX: CGFloat = 12
+        let sideW = rail - 20
+        let above = layoutSidebar(x: sideX, y: sideTop, width: sideW)
+        var y = sideTop
         switch page {
-        case .island:
-            y = layoutIsland(text: text, y: y)
+        case .theme:
+            y = layoutLook(text: text, y: y)
+        case .sections:
+            y = layoutSections(text: text, y: y)
+        case .sound:
+            y = layoutSound(text: text, y: y)
+        case .search:
+            y = layoutToggle(searchLabel, searchSwitch, text: text, y: y) + 8
         case .translate:
             y = layoutTranslate(text: text, y: y)
         case .updates:
@@ -527,22 +698,212 @@ final class SettingsPanel: NSObject {
         case .shot:
             y = layoutShot(text: text, y: y)
         }
-        fitWindow(contentBottom: y + 8)
+        let sideBottom = pinUpdates(x: sideX, above: above, width: sideW, pageBottom: y)
+        pourPill()
+        let column = max(sideBottom, y)
+        place(railLine, NSRect(x: rail, y: sideTop, width: 1, height: max(24, column - sideTop)))
+        fitWindow(contentBottom: column + 8)
     }
 
-    /// Ряд вкладок. Возвращает его низ.
-    private func layoutTabs(x: CGFloat, y: CGFloat) -> CGFloat {
-        var cursor = x
-        for button in tabButtons {
-            let width = max(button.fittingSize.width, 24)
-            button.frame = NSRect(x: cursor, y: y, width: width, height: 22)
-            cursor += width + 18
+    /// Левое меню. Тексты с одного края, подсветка перетекает к выбранной строке.
+    private func layoutSidebar(x: CGFloat, y: CGFloat, width: CGFloat) -> CGFloat {
+        let row: CGFloat = 34
+        let gap: CGFloat = 2
+        guard sideButtons.count == 7 else { return y }
+        let island = sideButtons[0]
+        let children = sideButtons.filter { $0.rowTag >= 0 && SettingsPage(rawValue: $0.rowTag)?.underIsland == true }
+        let rest = sideButtons.filter {
+            $0.rowTag >= 0
+                && $0.rowTag != SettingsPage.updates.rawValue
+                && SettingsPage(rawValue: $0.rowTag)?.underIsland != true
         }
-        return y + 22
+        island.textInset = 12
+        place(island, NSRect(x: x, y: y, width: width, height: row))
+        place(chevron, NSRect(x: x + width - 26, y: y + (row - 14) / 2, width: 14, height: 14))
+        body.addSubview(chevron, positioned: .above, relativeTo: nil)
+        turnChevron()
+        var cursor = y + row + gap
+        let full = CGFloat(children.count) * (row + gap)
+        nest.frame = NSRect(x: x, y: cursor, width: width, height: max(0, full * reveal))
+        var inner: CGFloat = 0
+        for button in children {
+            button.textInset = 26
+            button.isHidden = reveal < 0.04
+            button.alphaValue = reveal
+            button.frame = NSRect(x: 0, y: inner, width: width, height: row)
+            inner += row + gap
+        }
+        cursor += full * reveal
+        for button in rest {
+            button.textInset = 12
+            place(button, NSRect(x: x, y: cursor, width: width, height: row))
+            cursor += row + gap
+        }
+        return cursor
     }
 
-    /// Звук и поиск. Включён может быть только один.
-    private func layoutIsland(text: NSRect, y: CGFloat) -> CGFloat {
+    /// «Обновления» всегда у нижнего края окна, остальные пункты остаются сверху.
+    private func pinUpdates(x: CGFloat, above: CGFloat, width: CGFloat, pageBottom: CGFloat) -> CGFloat {
+        guard let updates = sideButtons.first(where: { $0.rowTag == SettingsPage.updates.rawValue }) else {
+            return above
+        }
+        let row: CGFloat = 34
+        let bottomPad: CGFloat = 18
+        let minFloor: CGFloat = 300 - 28
+        let floor = max(minFloor, above + row + bottomPad, pageBottom + bottomPad)
+        let y = max(above + 8, floor - bottomPad - row)
+        updates.textInset = 12
+        place(updates, NSRect(x: x, y: y, width: width, height: row))
+        return y + row
+    }
+
+    /// Стрелка остаётся справа в строке. Поворот слоя уносил её влево: якорь вида в нуле.
+    private func turnChevron() {
+        let angle = (1 - reveal) * (.pi / 2)
+        guard abs(angle) > 0.001 else {
+            chevron.image = chevronMark
+            return
+        }
+        let size = chevronMark.size
+        let turned = NSImage(size: size, flipped: false) { rect in
+            let transform = NSAffineTransform()
+            transform.translateX(by: rect.midX, yBy: rect.midY)
+            transform.rotate(byRadians: angle)
+            transform.translateX(by: -rect.midX, yBy: -rect.midY)
+            transform.concat()
+            self.chevronMark.draw(in: rect)
+            return true
+        }
+        turned.isTemplate = true
+        chevron.image = turned
+    }
+
+    /// Цель подсветки — выбранная строка. Пока едет, пятно тянется в сторону цели.
+    private func pourPill() {
+        guard let row = selectedRow() else { return }
+        let target = row.convert(row.bounds, to: body).insetBy(dx: 6, dy: 3)
+        if pillRect.isEmpty {
+            pillRect = target
+            pillTarget = target
+        } else {
+            pillTarget = target
+        }
+        let dy = pillTarget.midY - pillRect.midY
+        let stretch = min(42, abs(dy) * 0.9)
+        var drawn = pillRect
+        if dy > 0.8 {
+            drawn.size.height += stretch
+        } else if dy < -0.8 {
+            drawn.origin.y -= stretch
+            drawn.size.height += stretch
+        }
+        pill.frame = drawn
+        pill.layer?.cornerRadius = min(12, drawn.height / 2)
+        if hypot(pillRect.midX - pillTarget.midX, pillRect.midY - pillTarget.midY) > 0.6 {
+            kickMotion()
+        }
+    }
+
+    private func selectedRow() -> MenuRow? {
+        if page == .theme { return sideButtons.first { $0.rowTag < 0 } }
+        return sideButtons.first { $0.rowTag == page.rawValue }
+    }
+
+    /// Строка раздела, которую можно перетащить. Порядок пишется и на островок.
+    private func makeSectionLine(_ section: IslandSection) -> SectionLine {
+        let line = SectionLine(section: section)
+        line.onDrag = { [weak self, weak line] y in
+            guard let self, let line else { return }
+            self.dragLine = line
+            self.settlingLine = nil
+            self.dragY = y
+            self.liftTarget = 1
+            self.reorderDragged()
+            self.body.addSubview(line, positioned: .above, relativeTo: nil)
+            self.kickMotion()
+            self.body.needsLayout = true
+        }
+        line.onDrop = { [weak self, weak line] in
+            guard let self else { return }
+            if self.dragLine === line {
+                self.settlingLine = line
+                self.dragLine = nil
+                self.liftTarget = 0
+                self.kickMotion()
+            }
+            self.body.needsLayout = true
+        }
+        line.onToggle = { [weak self] on in
+            IslandSection.setShown(section, on)
+            self?.refreshSectionToggles()
+        }
+        return line
+    }
+
+    /// Тумблеры по записи. Последний включённый не даёт себя выключить.
+    private func refreshSectionToggles() {
+        let alone = IslandSection.visible.count <= 1
+        for line in sectionLines {
+            let on = IslandSection.isShown(line.section)
+            line.setShown(on, enabled: !(on && alone))
+        }
+    }
+
+    /// Пока строку тащат, она меняется местами с той, чью середину пересекла.
+    private func reorderDragged() {
+        guard dragLine != nil else { return }
+        let pitch: CGFloat = 48
+        let target = min(max(0, Int(((dragY - sectionOrigin) / pitch).rounded())), sectionLines.count - 1)
+        guard let from = sectionLines.firstIndex(where: { $0 === dragLine }), from != target else { return }
+        let line = sectionLines.remove(at: from)
+        sectionLines.insert(line, at: target)
+        IslandSection.order = sectionLines.map(\.section)
+    }
+
+    /// Полка, буфер, закрепы и переводчик. Соседи едут к слоту, тянущаяся — за курсором.
+    private func layoutSections(text: NSRect, y: CGFloat) -> CGFloat {
+        sectionOrigin = y
+        let row: CGFloat = 40
+        let gap: CGFloat = 8
+        let pitch = row + gap
+        let limit = y + CGFloat(max(0, sectionLines.count - 1)) * pitch
+        let traveling = dragLine != nil || settlingLine != nil
+        var homes: [ObjectIdentifier: CGFloat] = [:]
+        for (index, line) in sectionLines.enumerated() {
+            let id = ObjectIdentifier(line)
+            let home = y + CGFloat(index) * pitch
+            homes[id] = home
+            let shown: CGFloat
+            if line === dragLine {
+                shown = min(max(dragY, y), limit)
+            } else if traveling, let current = sectionShown[id] {
+                shown = current
+            } else {
+                shown = home
+            }
+            sectionShown[id] = shown
+            let raised = line === dragLine || line === settlingLine
+            let extra = raised ? 2 * lift : 0
+            line.frame = NSRect(
+                x: text.minX - extra,
+                y: shown - extra,
+                width: text.width + extra * 2,
+                height: row + extra * 2
+            )
+            line.setLift(raised ? lift : 0)
+        }
+        sectionHome = homes
+        if let raised = dragLine ?? settlingLine {
+            body.addSubview(raised, positioned: .above, relativeTo: nil)
+        }
+        if traveling || abs(lift - liftTarget) > 0.01 {
+            kickMotion()
+        }
+        return y + CGFloat(sectionLines.count) * pitch
+    }
+
+    /// Звук на полосе и плагин.
+    private func layoutSound(text: NSRect, y: CGFloat) -> CGFloat {
         var y = layoutToggle(soundLabel, soundSwitch, text: text, y: y) + 8
         let captionHeight = measuredHeight(soundCaption.stringValue, width: text.width, font: soundCaption.font, limit: 72)
         soundCaption.frame = NSRect(x: text.minX, y: y, width: text.width, height: captionHeight)
@@ -551,7 +912,7 @@ final class SettingsPanel: NSObject {
             y = layoutInstalled(soundReady, soundCheck, text: text, y: y)
         } else {
             soundInstall.isEnabled = true
-            soundInstall.frame = NSRect(x: text.minX, y: y, width: soundInstall.frame.width + 8, height: 28)
+            soundInstall.frame = NSRect(x: text.minX, y: y, width: buttonWidth(soundInstall), height: 28)
             y += 34
             if !soundNote.stringValue.isEmpty {
                 let noteHeight = measuredHeight(soundNote.stringValue, width: text.width, font: soundNote.font, limit: 48)
@@ -559,9 +920,26 @@ final class SettingsPanel: NSObject {
                 y += noteHeight + 8
             }
         }
-        y += 8
-        y = layoutToggle(searchLabel, searchSwitch, text: text, y: y) + 18
-        return layoutLook(text: text, y: y)
+        return y + 8
+    }
+
+    /// Слой не догоняет кадр своим аниматором: у фоновой утки он дёргается.
+    private func quietLayer(_ view: NSView) {
+        let still = StillLayer()
+        view.layer?.actions = [
+            "bounds": still,
+            "position": still,
+            "cornerRadius": still,
+            "backgroundColor": still,
+            "transform": still,
+            "opacity": still
+        ]
+    }
+
+    /// Кадр без системного аниматора: тот в фоновом приложении не тикает.
+    private func place(_ view: NSView, _ frame: NSRect) {
+        view.frame = frame
+        view.alphaValue = 1
     }
 
     /// Режим, стекло и один цвет выбранного.
@@ -640,7 +1018,7 @@ final class SettingsPanel: NSObject {
         if !accentWell.isActive { accentWell.color = IslandLook.accent }
         strokeSwitch.state = IslandLook.strokeOn ? .on : .off
         if !strokeWell.isActive { strokeWell.color = IslandLook.strokeColor }
-        paintTabs()
+        paintSidebar()
     }
 
     /// Надпись «установлен» и зелёная галка.
@@ -694,7 +1072,7 @@ final class SettingsPanel: NSObject {
         nativeState.frame = NSRect(x: text.maxX - 88, y: y, width: 88, height: 16)
         y += 22
         if !nativeButton.isHidden {
-            nativeButton.frame = NSRect(x: text.minX, y: y, width: nativeButton.frame.width + 8, height: 28)
+            nativeButton.frame = NSRect(x: text.minX, y: y, width: buttonWidth(nativeButton), height: 28)
             y += 34
         }
         if !nativeNote.stringValue.isEmpty {
@@ -709,8 +1087,8 @@ final class SettingsPanel: NSObject {
         var y = y
         versionLabel.frame = NSRect(x: text.minX, y: y, width: text.width, height: 16)
         y += 24
-        let updateWidth = updateButton.frame.width + 8
-        let restoreWidth = restoreButton.frame.width + 8
+        let updateWidth = buttonWidth(updateButton)
+        let restoreWidth = buttonWidth(restoreButton)
         updateButton.frame = NSRect(x: text.minX, y: y, width: updateWidth, height: 28)
         let restoreX = text.minX + updateWidth + 8
         if restoreX + restoreWidth <= text.maxX {
@@ -732,7 +1110,7 @@ final class SettingsPanel: NSObject {
             y += height + 8
         }
         if !installButton.isHidden {
-            installButton.frame = NSRect(x: text.minX, y: y, width: installButton.frame.width + 8, height: 28)
+            installButton.frame = NSRect(x: text.minX, y: y, width: buttonWidth(installButton), height: 28)
             y += 36
         }
         return y
@@ -760,13 +1138,12 @@ final class SettingsPanel: NSObject {
         return y + row
     }
 
-    /// Держит верх окна на месте и убирает пустоту под последней строкой.
+    /// Держит верх окна на месте. Высота ставится кадром, без системного аниматора.
     private func fitWindow(contentBottom: CGFloat) {
-        let height = contentBottom + 40
+        let height = max(300, contentBottom + 28)
         let frame = window.frame
-        guard abs(frame.height - height) > 1 else { return }
-        let top = frame.maxY
-        window.setFrame(NSRect(x: frame.minX, y: top - height, width: frame.width, height: height), display: true)
+        guard abs(frame.height - height) > 0.5 else { return }
+        window.setFrame(NSRect(x: frame.minX, y: frame.maxY - height, width: frame.width, height: height), display: true)
     }
 
 }
@@ -830,6 +1207,183 @@ private final class SettingsStroke: NSView {
         path.lineWidth = width
         IslandLook.strokeColor.setStroke()
         path.stroke()
+    }
+}
+
+/// Пункт бокового меню. Подпись с одного левого края, клик по всей строке.
+private final class MenuRow: NSView {
+    let titleLabel: NSTextField
+    let rowTag: Int
+    var textInset: CGFloat = 12 { didSet { needsLayout = true } }
+    var onClick: (() -> Void)?
+
+    init(title: String, rowTag: Int) {
+        self.rowTag = rowTag
+        titleLabel = UtkaChrome.label(title, size: 13, weight: .medium)
+        super.init(frame: .zero)
+        wantsLayer = true
+        let still = StillLayer()
+        layer?.actions = [
+            "bounds": still,
+            "position": still,
+            "opacity": still
+        ]
+        addSubview(titleLabel)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        let textHeight: CGFloat = 18
+        titleLabel.frame = NSRect(
+            x: textInset,
+            y: (bounds.height - textHeight) / 2,
+            width: max(24, bounds.width - textInset - 28),
+            height: textHeight
+        )
+    }
+
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(point) else { return }
+        onClick?()
+    }
+}
+
+/// Пустое действие слоя: кадры меню ставит таймер, не аниматор Core Animation.
+private final class StillLayer: NSObject, CAAction {
+    func run(forKey event: String, object anObject: Any, arguments dict: [AnyHashable: Any]?) {}
+}
+
+/// Значок меню. Клики проходят к пункту под ним.
+private final class SidebarGlyph: NSImageView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// Строка раздела островка: иконка, имя, тумблер и захват для перестановки.
+private final class SectionLine: NSView {
+    let section: IslandSection
+    var onDrag: ((CGFloat) -> Void)?
+    var onDrop: (() -> Void)?
+    var onToggle: ((Bool) -> Void)?
+    private let icon = NSImageView()
+    private let titleLabel: NSTextField
+    private let grip = NSImageView()
+    private let toggle = NSSwitch()
+    private var grab: CGFloat = 0
+    private var shown = true
+
+    init(section: IslandSection) {
+        self.section = section
+        titleLabel = UtkaChrome.label(section.listTitle, size: 13, weight: .medium)
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        let still = StillLayer()
+        layer?.actions = [
+            "bounds": still,
+            "position": still,
+            "backgroundColor": still,
+            "transform": still,
+            "shadowOpacity": still,
+            "shadowRadius": still,
+            "shadowOffset": still,
+            "shadowPath": still,
+            "shadowColor": still
+        ]
+        icon.image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: section.listTitle)?
+            .withSymbolConfiguration(.init(pointSize: 15, weight: .medium))
+        icon.imageScaling = .scaleProportionallyDown
+        grip.image = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: "Перетащить")?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        grip.imageScaling = .scaleProportionallyDown
+        toggle.target = self
+        toggle.action = #selector(toggled)
+        addSubview(icon)
+        addSubview(titleLabel)
+        addSubview(grip)
+        addSubview(toggle)
+        applyLook()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    /// Тень на время перетаскивания. Ноль — карточка снова лежит в слоте.
+    func setLift(_ amount: CGFloat) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = Float(0.32 * amount)
+        layer?.shadowRadius = 12 * amount
+        layer?.shadowOffset = CGSize(width: 0, height: -4 * amount)
+        layer?.shadowPath = CGPath(roundedRect: bounds, cornerWidth: 8, cornerHeight: 8, transform: nil)
+        CATransaction.commit()
+    }
+
+    /// Включён — раздел на островке. Последний включённый тумблер не нажимается.
+    func setShown(_ on: Bool, enabled: Bool) {
+        shown = on
+        toggle.state = on ? .on : .off
+        toggle.isEnabled = enabled
+        applyShown()
+    }
+
+    /// Подтягивает строку под текущую тему.
+    func applyLook() {
+        layer?.backgroundColor = UtkaChrome.card.cgColor
+        grip.contentTintColor = UtkaChrome.dim
+        applyShown()
+    }
+
+    private func applyShown() {
+        let color = shown ? UtkaChrome.ink : UtkaChrome.dim
+        titleLabel.textColor = color
+        icon.contentTintColor = color
+    }
+
+    @objc private func toggled() {
+        onToggle?(toggle.state == .on)
+    }
+
+    override func layout() {
+        super.layout()
+        let side = min(18, bounds.height - 8)
+        icon.frame = NSRect(x: 12, y: (bounds.height - side) / 2, width: side, height: side)
+        var switchSize = toggle.fittingSize
+        if switchSize.width < 8 { switchSize = NSSize(width: 38, height: 22) }
+        toggle.frame = NSRect(
+            x: bounds.width - 12 - switchSize.width,
+            y: (bounds.height - switchSize.height) / 2,
+            width: switchSize.width,
+            height: switchSize.height
+        )
+        grip.frame = NSRect(x: toggle.frame.minX - 22, y: (bounds.height - 14) / 2, width: 16, height: 14)
+        titleLabel.frame = NSRect(x: 40, y: (bounds.height - 18) / 2, width: max(40, grip.frame.minX - 48), height: 18)
+    }
+
+    override func resetCursorRects() {
+        let drag = NSRect(x: 0, y: 0, width: max(0, toggle.frame.minX), height: bounds.height)
+        addCursorRect(drag, cursor: .openHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        grab = bounds.height - local.y
+        NSCursor.closedHand.push()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let parent = superview else { return }
+        let point = parent.convert(event.locationInWindow, from: nil)
+        onDrag?(point.y - grab)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        NSCursor.pop()
+        onDrop?()
     }
 }
 
