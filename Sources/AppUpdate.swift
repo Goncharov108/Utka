@@ -114,18 +114,106 @@ enum AppUpdate {
         return names == ["VERSION"]
     }
 
-    /// Собирает приложение после выхода текущего процесса и открывает его снова.
-    static func startRebuild() -> Bool {
-        guard let repo = repoRoot() else { return false }
+    /// Уже стоящий звуковой плагин. Хеш снимается до сборки, вопрос пароля — после.
+    private static let driverBinary = "/Library/Audio/Plug-Ins/HAL/UtkaAudio.driver/Contents/MacOS/UtkaAudio"
+
+    /// Временный бандл кнопки «Установить». Запущенный Utka.app это не он.
+    private static func stageBundle() -> URL {
+        UtkaPaths.support.appendingPathComponent("Utka.next.app", isDirectory: true)
+    }
+
+    /// Хеш уже стоящего плагина. Пусто, если файла нет.
+    static func driverFingerprint() -> String {
+        let path = driverBinary
+        guard FileManager.default.fileExists(atPath: path) else { return "" }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
+        process.arguments = ["-a", "256", path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return ""
+        }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return "" }
+        let text = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return text.split(separator: " ").first.map(String.init) ?? ""
+    }
+
+    /// Собирает утку во временный бандл, пока этот процесс жив. nil — вышло.
+    /// onStep приходит не с главного потока: previous, arm64, skip arm64 и другие строки шага.
+    static func runStagedBuild(onStep: @escaping (String) -> Void) -> String? {
+        guard let repo = repoRoot() else { return "Сборка не вышла" }
         let log = UtkaPaths.support.appendingPathComponent("update.log")
+        guard FileManager.default.createFile(atPath: log.path, contents: nil),
+              let handle = try? FileHandle(forWritingTo: log) else {
+            return "Сборка не вышла"
+        }
+        defer { try? handle.close() }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["scripts/build-app.sh"]
+        process.currentDirectoryURL = repo
+        process.standardInput = FileHandle.nullDevice
+        var env = ProcessInfo.processInfo.environment
+        env["UTKA_INSTALL"] = "1"
+        env["UTKA_STAGE"] = stageBundle().path
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+        process.environment = env
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = handle
+        let buffer = InstallStepBuffer()
+        let readLock = NSLock()
+        pipe.fileHandleForReading.readabilityHandler = { pipeHandle in
+            readLock.lock()
+            let data = pipeHandle.availableData
+            buffer.append(data, emit: onStep)
+            readLock.unlock()
+        }
+        do {
+            try process.run()
+        } catch {
+            pipe.fileHandleForReading.readabilityHandler = nil
+            removeStage()
+            return "Сборка не вышла"
+        }
+        process.waitUntilExit()
+        pipe.fileHandleForReading.readabilityHandler = nil
+        readLock.lock()
+        let rest = pipe.fileHandleForReading.readDataToEndOfFile()
+        buffer.append(rest, emit: onStep)
+        buffer.finish(emit: onStep)
+        readLock.unlock()
+        if process.terminationStatus != 0 {
+            removeStage()
+            return "Сборка не вышла"
+        }
+        return nil
+    }
+
+    /// После успешной сборки ставит новый бандл на место и открывает его. Git не трогает.
+    static func startHandoff(driverBefore: String) -> Bool {
+        guard let repo = repoRoot() else { return false }
         let scriptURL = UtkaPaths.support.appendingPathComponent("update.sh")
-        let script = rebuildScript(
-            repo: repo,
-            log: log,
+        let script = handoffScript(
+            live: Bundle.main.bundleURL,
+            stage: stageBundle(),
+            driverBefore: driverBefore,
             pid: ProcessInfo.processInfo.processIdentifier
         )
         guard writeExecutable(script, to: scriptURL) else { return false }
         return launchDetached(scriptURL, in: repo)
+    }
+
+    /// Снимает временный бандл, если сборка не вышла. Запущенную утку не трогает.
+    private static func removeStage() {
+        let url = stageBundle()
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try? FileManager.default.removeItem(at: url)
     }
 
     /// Ставит предыдущую утку на место текущей. nil — скрипт запущен. Текст — почему нельзя.
@@ -225,25 +313,30 @@ enum AppUpdate {
         return names.first
     }
 
-    /// Скрипт переживает выход утки: дожидается процесса, собирает и открывает.
-    private static func rebuildScript(repo: URL, log: URL, pid: Int32) -> String {
-        let driver = "/Library/Audio/Plug-Ins/HAL/UtkaAudio.driver/Contents/MacOS/UtkaAudio"
+    /// Ждёт выход утки, ставит собранный бандл на место и открывает его. Сборку не запускает.
+    private static func handoffScript(live: URL, stage: URL, driverBefore: String, pid: Int32) -> String {
+        let hold = UtkaPaths.support.appendingPathComponent("Utka.swap.app")
         return """
         #!/bin/bash
         set -u
         export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
-        exec >\(bashQuote(log.path)) 2>&1
-        cd \(bashQuote(repo.path)) || exit 1
         \(waitSnippet(pid: pid))
-        driver=\(bashQuote(driver))
-        before=""
-        if [ -f "$driver" ]; then
-          before=$(shasum -a 256 "$driver" | awk '{print $1}')
-        fi
-        if ! UTKA_INSTALL=1 bash scripts/build-app.sh; then
-          osascript -e 'display alert "Утка не собралась" message "Подробности в ~/Library/Application Support/Utka/update.log"' || true
+        live=\(bashQuote(live.path))
+        stage=\(bashQuote(stage.path))
+        hold=\(bashQuote(hold.path))
+        say_fail() {
+          osascript -e 'display alert "Не удалось поставить новую утку"' || true
+          if [ -x "$live/Contents/MacOS/Utka" ]; then
+            open "$live" || true
+          fi
           exit 1
-        fi
+        }
+        rm -rf "$hold"
+        mv "$live" "$hold" || say_fail
+        mv "$stage" "$live" || { mv "$hold" "$live" || true; say_fail; }
+        rm -rf "$hold"
+        driver=\(bashQuote(driverBinary))
+        before=\(bashQuote(driverBefore))
         after=""
         if [ -f "$driver" ]; then
           after=$(shasum -a 256 "$driver" | awk '{print $1}')
@@ -251,7 +344,7 @@ enum AppUpdate {
         if [ "$before" != "$after" ]; then
           osascript -e 'do shell script "killall coreaudiod" with prompt "Утке нужно перезапустить системный звук, чтобы подхватить новый выход." with administrator privileges' || true
         fi
-        open \(bashQuote(repo.appendingPathComponent("Utka.app").path))
+        open "$live"
         """
     }
 
@@ -358,5 +451,62 @@ enum AppUpdate {
             ? (String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "")
             : ""
         return (process.terminationStatus, output)
+    }
+}
+
+/// Копит stdout сборки и отдаёт только строки шага.
+private final class InstallStepBuffer {
+    private var pending = Data()
+    private let lock = NSLock()
+
+    /// Забирает целые строки. Хвост без перевода строки остаётся до finish.
+    func append(_ data: Data, emit: (String) -> Void) {
+        let lines = lockedLines(adding: data, flush: false)
+        lines.forEach { emitStep($0, emit: emit) }
+    }
+
+    /// Отдаёт недописанный хвост, если процесс уже кончился.
+    func finish(emit: (String) -> Void) {
+        let lines = lockedLines(adding: Data(), flush: true)
+        lines.forEach { emitStep($0, emit: emit) }
+    }
+
+    /// Склеивает куски в строки. Пустой кусок ничего не стирает.
+    private func lockedLines(adding data: Data, flush: Bool) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        if !data.isEmpty {
+            pending.append(data)
+        }
+        var lines: [String] = []
+        let newline: UInt8 = 10
+        while let index = pending.firstIndex(of: newline) {
+            let chunk = pending.prefix(upTo: index)
+            pending.removeSubrange(pending.startIndex...index)
+            lines.append(decode(chunk))
+        }
+        if flush, !pending.isEmpty {
+            lines.append(decode(pending))
+            pending.removeAll()
+        }
+        return lines
+    }
+
+    /// Строка шага без префикса. Чужой stdout сборки пропускается.
+    private func emitStep(_ line: String, emit: (String) -> Void) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("UTKA_STEP ") else { return }
+        let token = String(trimmed.dropFirst("UTKA_STEP ".count)).trimmingCharacters(in: .whitespaces)
+        guard !token.isEmpty else { return }
+        emit(token)
+    }
+
+    /// Байты строки без завершающего возврата каретки.
+    private func decode(_ data: Data) -> String {
+        var text = String(data: data, encoding: .utf8) ?? ""
+        if text.hasSuffix("\r") {
+            text.removeLast()
+        }
+        return text
     }
 }
