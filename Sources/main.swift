@@ -32,6 +32,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let translator = TranslatorView()
         let mark = Bundle.main.url(forResource: "utka-mark", withExtension: "png").flatMap { NSImage(contentsOf: $0) }
 
+        SectionBoard.reload()
         hover = HoverMonitor()
         panel = IslandPanel(shelf: shelfView, clipboard: clipboardView, presets: presetsView, translator: translator, mark: mark)
         settings.onIslandBar = { [weak panel] in
@@ -207,8 +208,8 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func sectionClicked(_ sender: NSButton) {
-        guard let section = IslandSection(rawValue: sender.tag) else { return }
-        panel.select(section)
+        guard let section = sender as? SectionRailButton else { return }
+        panel.openSection(section)
     }
 }
 

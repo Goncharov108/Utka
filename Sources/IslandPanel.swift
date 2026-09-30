@@ -31,69 +31,27 @@ enum IslandSection: Int, CaseIterable {
         }
     }
 
+    /// Короткий id в каталоге и в памяти порядка.
+    var slotID: String {
+        switch self {
+        case .shelf: return "shelf"
+        case .clipboard: return "clipboard"
+        case .presets: return "presets"
+        case .translate: return "translate"
+        }
+    }
+
+    init?(slotID: String) {
+        switch slotID {
+        case "shelf": self = .shelf
+        case "clipboard": self = .clipboard
+        case "presets": self = .presets
+        case "translate": self = .translate
+        default: return nil
+        }
+    }
+
     static let orderChanged = Notification.Name("utka.sectionOrder")
-    private static let orderKey = "islandSectionOrder"
-    private static let shownKey = "islandSectionShown"
-
-    /// Сверху вниз, как на полосе островка. Пустая запись — прежний порядок.
-    static var order: [IslandSection] {
-        get { storedOrder() }
-        set {
-            let next = normalized(newValue)
-            guard next != storedOrder() else { return }
-            UserDefaults.standard.set(next.map(\.rawValue), forKey: orderKey)
-            NotificationCenter.default.post(name: orderChanged, object: nil)
-        }
-    }
-
-    private static func storedOrder() -> [IslandSection] {
-        guard let raw = UserDefaults.standard.array(forKey: orderKey) as? [Int] else {
-            return allCases
-        }
-        return normalized(raw.compactMap(IslandSection.init(rawValue:)))
-    }
-
-    /// Каждый раздел один раз, недостающие дописываются в конец.
-    private static func normalized(_ items: [IslandSection]) -> [IslandSection] {
-        var seen = Set<IslandSection>()
-        var result: [IslandSection] = []
-        for item in items where seen.insert(item).inserted {
-            result.append(item)
-        }
-        for item in allCases where seen.insert(item).inserted {
-            result.append(item)
-        }
-        return result
-    }
-
-    /// Раздел на полосе островка. Пока запись пустая, включены все.
-    static func isShown(_ section: IslandSection) -> Bool {
-        guard let raw = UserDefaults.standard.array(forKey: shownKey) as? [Int] else { return true }
-        return raw.contains(section.rawValue)
-    }
-
-    /// Включённые разделы сверху вниз. Хотя бы один остаётся на полосе.
-    static var visible: [IslandSection] {
-        let shown = order.filter(isShown)
-        if !shown.isEmpty { return shown }
-        return Array(order.prefix(1))
-    }
-
-    /// Включает или прячет раздел. Последний включённый не выключается.
-    static func setShown(_ section: IslandSection, _ on: Bool) {
-        var shown = Set(allCases.filter(isShown))
-        if on {
-            shown.insert(section)
-        } else {
-            guard shown.count > 1 else { return }
-            shown.remove(section)
-        }
-        let next = allCases.compactMap { shown.contains($0) ? $0.rawValue : nil }
-        let stored = UserDefaults.standard.array(forKey: shownKey) as? [Int] ?? allCases.map(\.rawValue)
-        guard Set(next) != Set(stored) else { return }
-        UserDefaults.standard.set(next, forKey: shownKey)
-        NotificationCenter.default.post(name: orderChanged, object: nil)
-    }
 }
 
 /// Панель без рамки, которая может принять фокус для полей текста.
@@ -806,11 +764,14 @@ final class IslandPanel {
     private let shotButton = NSButton()
     private let shotTarget = ShotButtonTarget()
     private let body = NSView()
-    private let buttons: [NSButton]
-    private var buttonTargets: [Int: NSRect] = [:]
+    private let sectionRail = NSView()
+    private var bodies: [String: NSView] = [:]
+    private var railButtons: [SectionRailButton] = []
+    private var buttonTargets: [String: NSRect] = [:]
     private var buttonMotion: Timer?
-    private let sections: [NSView]
-    private var current: IslandSection = .shelf
+    private var currentID = IslandSection.shelf.slotID
+    private weak var clickTarget: AnyObject?
+    private var clickAction: Selector?
     private var slideTimer: Timer?
     private var slideFrom: CGRect = .zero
     private var slideTo: CGRect = .zero
@@ -829,7 +790,7 @@ final class IslandPanel {
         soundStrip.applyChrome()
         searchDrop.retint()
         sourceDrop.retint()
-        showSection(current)
+        show(id: currentID)
     }
 
     /// Меняет полосу, кнопку снимка не двигает.
@@ -885,7 +846,12 @@ final class IslandPanel {
     }
 
     init(shelf: NSView, clipboard: NSView, presets: NSView, translator: NSView, mark: NSImage?) {
-        sections = [shelf, clipboard, presets, translator]
+        bodies = [
+            IslandSection.shelf.slotID: shelf,
+            IslandSection.clipboard.slotID: clipboard,
+            IslandSection.presets.slotID: presets,
+            IslandSection.translate.slotID: translator
+        ]
         let panel = KeyPanel(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 280),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -914,26 +880,10 @@ final class IslandPanel {
         panel.contentView = host
         root.frame = host.bounds
 
-        let rail = NSView()
         let markView = DuckMarkView()
         markView.image = mark.map { MenuMark.cutout(from: $0) }
-        rail.addSubview(markView)
-
-        var made: [NSButton] = []
-        for section in IslandSection.allCases {
-            let button = NSButton()
-            button.isBordered = false
-            button.bezelStyle = .shadowlessSquare
-            button.imagePosition = .imageOnly
-            button.image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: section.title)?
-                .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
-            button.toolTip = section.title
-            button.tag = section.rawValue
-            button.target = nil
-            rail.addSubview(button)
-            made.append(button)
-        }
-        buttons = made
+        sectionRail.addSubview(markView)
+        syncRail()
 
         shotButton.isBordered = false
         shotButton.imagePosition = .imageOnly
@@ -948,7 +898,7 @@ final class IslandPanel {
         shotButton.action = #selector(ShotButtonTarget.take)
         topBar.addSubview(soundStrip)
         topBar.addSubview(shotButton)
-        root.addSubview(rail)
+        root.addSubview(sectionRail)
         root.addSubview(topBar)
         root.addSubview(body)
         root.addSubview(searchDrop)
@@ -972,11 +922,11 @@ final class IslandPanel {
             guard let hit = self?.searchDrop.current() else { return }
             IslandSearch.open(hit)
         }
-        showSection(.shelf)
+        show(id: IslandSection.shelf.slotID)
 
         root.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: root, queue: .main) { _ in
-            rail.frame = NSRect(x: 0, y: 0, width: 88, height: self.root.bounds.height)
+            self.sectionRail.frame = NSRect(x: 0, y: 0, width: 88, height: self.root.bounds.height)
             markView.frame = NSRect(x: 44, y: self.root.bounds.height - 86, width: 40, height: 40)
             self.placeSectionButtons(animated: false)
             let bottom: CGFloat = 14
@@ -1005,35 +955,75 @@ final class IslandPanel {
             self?.applyLook()
         }
         NotificationCenter.default.addObserver(forName: IslandSection.orderChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.syncRail()
             self?.placeSectionButtons(animated: true)
         }
         applyLook()
     }
 
-    /// Кнопки разделов сверху вниз в сохранённом порядке.
+    /// Кнопки разделов сверху вниз в сохранённом порядке. Четыре ядровых остаются 36×36 с шагом 42.
     private func placeSectionButtons(animated: Bool) {
+        let visible = SectionBoard.visible
+        let metrics = railMetrics(count: max(visible.count, 1))
         var y = root.bounds.height - 132
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let visible = Set(IslandSection.visible.map(\.rawValue))
-        for button in buttons {
-            let on = visible.contains(button.tag)
+        let visibleIDs = Set(visible.map(\.id))
+        for button in railButtons {
+            let on = visibleIDs.contains(button.slotID)
             button.isHidden = !on
-            if !on { buttonTargets.removeValue(forKey: button.tag) }
+            button.updateSymbol(point: metrics.symbol)
+            if !on { buttonTargets.removeValue(forKey: button.slotID) }
         }
-        for section in IslandSection.visible {
-            guard let button = buttons.first(where: { $0.tag == section.rawValue }) else { continue }
-            let target = NSRect(x: 46, y: y, width: 36, height: 36)
-            y -= 42
-            buttonTargets[section.rawValue] = target
-            if !animated { button.frame = target }
+        for slot in visible {
+            guard let button = railButtons.first(where: { $0.slotID == slot.id }) else { continue }
+            let target = NSRect(x: 64 - metrics.size / 2, y: y, width: metrics.size, height: metrics.size)
+            y -= metrics.pitch
+            buttonTargets[slot.id] = target
+            if !animated || button.frame == .zero {
+                button.frame = target
+            }
         }
         CATransaction.commit()
         if animated { kickButtonMotion() }
-        let visibleOrder = IslandSection.visible
-        if !visibleOrder.contains(current), let next = visibleOrder.first {
-            select(next)
+        if !visibleIDs.contains(currentID), let next = visible.first {
+            select(slotID: next.id)
         }
+    }
+
+    /// Шаг полосы. При четырёх и меньше кадр прежний, дальше значки сжимаются внутри той же высоты.
+    private func railMetrics(count: Int) -> (size: CGFloat, pitch: CGFloat, symbol: CGFloat) {
+        if count <= 4 { return (36, 42, 16) }
+        let room = max(36, root.bounds.height - 132 - 14)
+        let fitted = room / CGFloat(max(count - 1, 1))
+        let pitch = min(42, max(22, fitted))
+        let size = min(36, pitch)
+        return (size, pitch, max(11, size * 16 / 36))
+    }
+
+    /// Собирает кнопки по текущему списку. Лишние разделы библиотеки с полосы уходят.
+    private func syncRail() {
+        let slots = SectionBoard.order
+        let ids = Set(slots.map(\.id))
+        for button in railButtons where !ids.contains(button.slotID) {
+            button.removeFromSuperview()
+            buttonTargets.removeValue(forKey: button.slotID)
+        }
+        railButtons.removeAll { !ids.contains($0.slotID) }
+        for slot in slots {
+            if let button = railButtons.first(where: { $0.slotID == slot.id }) {
+                button.retitle(slot)
+                continue
+            }
+            let button = SectionRailButton(slot: slot)
+            sectionRail.addSubview(button)
+            railButtons.append(button)
+        }
+        for id in Array(bodies.keys) where IslandSection(slotID: id) == nil && !ids.contains(id) {
+            bodies[id]?.removeFromSuperview()
+            bodies.removeValue(forKey: id)
+        }
+        wireRailButtons()
     }
 
     /// Иконки разделов доезжают сами: системный аниматор у утки не тикает.
@@ -1050,8 +1040,8 @@ final class IslandPanel {
         var moving = false
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        for button in buttons {
-            guard let target = buttonTargets[button.tag] else { continue }
+        for button in railButtons {
+            guard let target = buttonTargets[button.slotID] else { continue }
             let dy = target.origin.y - button.frame.origin.y
             if abs(dy) > 0.4 {
                 var frame = button.frame
@@ -1069,9 +1059,17 @@ final class IslandPanel {
     }
 
     func bindActions(target: AnyObject, action: Selector) {
-        for button in buttons {
-            button.target = target
-            button.action = action
+        clickTarget = target
+        clickAction = action
+        wireRailButtons()
+    }
+
+    /// Вешает уже известную цель на кнопки, в том числе появившиеся после запуска.
+    private func wireRailButtons() {
+        guard let clickAction else { return }
+        for button in railButtons {
+            button.target = clickTarget
+            button.action = clickAction
         }
     }
 
@@ -1161,22 +1159,43 @@ final class IslandPanel {
         root.frame = NSRect(x: 0, y: host.bounds.height - full.height, width: full.width, height: full.height)
     }
 
-    func select(_ section: IslandSection) {
-        showSection(section)
-        onSection?(section)
+    func select(slotID: String) {
+        show(id: slotID)
+        if let section = IslandSection(slotID: slotID) {
+            onSection?(section)
+        }
     }
 
-    private func showSection(_ section: IslandSection) {
-        current = section
+    /// Щелчок по кнопке полосы. Ядро сообщает наружу, раздел библиотеки только открывает карточку.
+    func openSection(_ sender: NSButton) {
+        guard let button = sender as? SectionRailButton else { return }
+        select(slotID: button.slotID)
+    }
+
+    private func show(id: String) {
+        currentID = id
         body.subviews.forEach { $0.removeFromSuperview() }
-        let view = sections[section.rawValue]
+        let view = viewFor(id)
         view.frame = body.bounds
         view.autoresizingMask = [.width, .height]
         body.addSubview(view)
-        for button in buttons {
-            let on = button.tag == section.rawValue
+        for button in railButtons {
+            let on = button.slotID == id
             button.contentTintColor = on ? IslandLook.accent : UtkaChrome.dim
         }
+    }
+
+    /// Тело ядра уже собрано. У раздела библиотеки тело — тихая карточка.
+    private func viewFor(_ id: String) -> NSView {
+        if let core = bodies[id], IslandSection(slotID: id) != nil { return core }
+        let title = SectionBoard.order.first { $0.id == id }?.listTitle ?? id
+        if let card = bodies[id] as? LibrarySectionBody {
+            card.setTitle(title)
+            return card
+        }
+        let card = LibrarySectionBody(title: title)
+        bodies[id] = card
+        return card
     }
 
     private func frame(on screen: NSScreen) -> CGRect {
@@ -1188,5 +1207,43 @@ final class IslandPanel {
 
     private func roughly(_ a: CGRect, _ b: CGRect) -> Bool {
         abs(a.minX - b.minX) < 2 && abs(a.minY - b.minY) < 2 && abs(a.width - b.width) < 2 && abs(a.height - b.height) < 2
+    }
+}
+
+/// Кнопка раздела на полосе. id строкой, чтобы рядом с ядром встал раздел библиотеки.
+final class SectionRailButton: NSButton {
+    let slotID: String
+    private var symbolName: String
+    private var accessTitle: String
+    private var symbolPoint: CGFloat = 0
+
+    init(slot: SectionSlot) {
+        slotID = slot.id
+        symbolName = slot.symbol
+        accessTitle = slot.title
+        super.init(frame: .zero)
+        isBordered = false
+        bezelStyle = .shadowlessSquare
+        imagePosition = .imageOnly
+        toolTip = slot.title
+        updateSymbol(point: 16)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    /// Подпись и значок, если карточка каталога сменилась.
+    func retitle(_ slot: SectionSlot) {
+        symbolName = slot.symbol
+        accessTitle = slot.title
+        toolTip = slot.title
+        symbolPoint = 0
+        updateSymbol(point: 16)
+    }
+
+    /// Размер значка. Повтор с тем же размером картинку не пересобирает.
+    func updateSymbol(point: CGFloat) {
+        guard abs(symbolPoint - point) > 0.1 else { return }
+        symbolPoint = point
+        image = utkaSymbol(symbolName, point: point, label: accessTitle)
     }
 }
