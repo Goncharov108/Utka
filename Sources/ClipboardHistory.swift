@@ -47,6 +47,14 @@ final class ClipboardHistory {
         onChange?()
     }
 
+    /// Снимает все строки истории. Системный буфер не трогает.
+    func clear() {
+        guard !items.isEmpty else { return }
+        items = []
+        save()
+        onChange?()
+    }
+
     /// Правило истории: пустое, файл и повтор подряд не добавляются.
     func consider(text: String?, hasFile: Bool) {
         guard !hasFile else { return }
@@ -97,6 +105,7 @@ final class ClipboardView: NSView {
     private let scroll = NSScrollView()
     private let document = FlippedView()
     private let empty = UtkaChrome.label("Пока пусто", size: 13, color: UtkaChrome.dim)
+    private let clearButton = NSButton()
     private var rows: [TextRowView] = []
     private let history: ClipboardHistory
 
@@ -111,11 +120,18 @@ final class ClipboardView: NSView {
         scroll.drawsBackground = false
         scroll.autohidesScrollers = true
         empty.alignment = .center
+        clearButton.isBordered = false
+        clearButton.target = self
+        clearButton.action = #selector(clearTapped)
+        clearButton.setButtonType(.momentaryPushIn)
+        paintClear()
         addSubview(scroll)
         addSubview(empty)
+        addSubview(clearButton)
         history.onChange = { [weak self] in self?.rebuild() }
         NotificationCenter.default.addObserver(forName: IslandLook.changed, object: nil, queue: .main) { [weak self] _ in
             self?.empty.textColor = UtkaChrome.dim
+            self?.paintClear()
         }
         rebuild()
     }
@@ -124,9 +140,40 @@ final class ClipboardView: NSView {
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
         super.resizeSubviews(withOldSize: oldSize)
-        scroll.frame = bounds
-        empty.frame = bounds
+        placeChrome()
         layoutRows()
+    }
+
+    /// Кнопка справа сверху, список под ней. Пустой буфер — только «Пока пусто».
+    private func placeChrome() {
+        let showClear = !rows.isEmpty
+        clearButton.isHidden = !showClear
+        guard showClear else {
+            scroll.frame = bounds
+            empty.frame = bounds
+            return
+        }
+        let bar: CGFloat = 22
+        let buttonW: CGFloat = 78
+        clearButton.frame = NSRect(x: bounds.width - buttonW, y: bounds.height - bar, width: buttonW, height: bar)
+        let list = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - bar - 4))
+        scroll.frame = list
+        empty.frame = list
+    }
+
+    /// Подпись кнопки в цвете хрома.
+    private func paintClear() {
+        clearButton.attributedTitle = NSAttributedString(
+            string: "Очистить",
+            attributes: [
+                .font: UtkaChrome.font(12, weight: .medium),
+                .foregroundColor: UtkaChrome.dim
+            ]
+        )
+    }
+
+    @objc private func clearTapped() {
+        history.clear()
     }
 
     private func rebuild() {
@@ -141,6 +188,7 @@ final class ClipboardView: NSView {
             return row
         }
         empty.isHidden = !rows.isEmpty
+        placeChrome()
         layoutRows()
     }
 

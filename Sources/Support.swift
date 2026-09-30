@@ -224,6 +224,58 @@ enum UtkaChrome {
         field.maximumNumberOfLines = 1
         return field
     }
+
+    /// Окно берёт текущий вид и перекрашивается в тот же момент, что и островок. Токен снять при закрытии.
+    static func track(_ window: NSWindow, repaint: @escaping () -> Void) -> NSObjectProtocol {
+        let apply = { [weak window] in
+            window?.appearance = IslandLook.appearance
+            repaint()
+        }
+        apply()
+        return NotificationCenter.default.addObserver(
+            forName: IslandLook.changed,
+            object: nil,
+            queue: nil
+        ) { _ in
+            apply()
+        }
+    }
+}
+
+/// Фон окна: стекло и вуаль капли. Сам перекрашивается при смене темы.
+final class UtkaPanelChrome: NSVisualEffectView {
+    private let veil = NSView()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        blendingMode = .behindWindow
+        state = .active
+        wantsLayer = true
+        layer?.cornerRadius = 14
+        layer?.masksToBounds = true
+        veil.wantsLayer = true
+        addSubview(veil)
+        NotificationCenter.default.addObserver(self, selector: #selector(apply), name: IslandLook.changed, object: nil)
+        apply()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        veil.frame = bounds
+        if subviews.first !== veil {
+            addSubview(veil, positioned: .below, relativeTo: nil)
+        }
+    }
+
+    /// Материал и плотность вуали как у капли.
+    @objc func apply() {
+        material = IslandLook.dark ? .hudWindow : .menu
+        appearance = IslandLook.appearance
+        window?.appearance = IslandLook.appearance
+        veil.layer?.backgroundColor = IslandLook.veil.cgColor
+    }
 }
 
 /// Документ списка, ноль сверху.

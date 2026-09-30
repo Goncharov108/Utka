@@ -1,0 +1,25 @@
+---
+description: Новое окно утки следует теме островка и перекрашивается при смене
+alwaysApply: true
+---
+
+# Окна следуют теме
+
+Любое новое окно (`NSWindow`, панель, диалог) берёт вид островка и обновляется, когда пользователь меняет тему. Цвет один раз в `init` недостаточен: окно может быть уже открыто.
+
+- Подключать через `UtkaChrome.track` в `Sources/Support.swift`. Токен снять, когда окно закрылось.
+- Фон нового окна — `UtkaPanelChrome`: стекло и вуаль капли (`IslandLook.veil`), не плоская заливка `IslandLook.solid`.
+- Краски текста только из `UtkaChrome` и `IslandLook`. Не зашивать чёрный, белый или системный `labelColor`.
+- Шрифт — `UtkaChrome.font`. Без `serif`, Times, New York.
+- `UtkaChrome.track` вызывает перекраску синхронно, в тот же момент, что и островок.
+
+```swift
+lookToken = UtkaChrome.track(window) { [weak self] in
+    self?.applyLook()
+}
+
+private func applyLook() {
+    card.layer?.backgroundColor = IslandLook.solid.cgColor
+    message.textColor = UtkaChrome.ink
+}
+```
