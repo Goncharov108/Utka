@@ -315,18 +315,22 @@ func oneLine(_ text: String, limit: Int = 80) -> String {
     return String(flat.prefix(limit)) + "…"
 }
 
-/// Карточка файла: превью, имя, вытаскивание наружу, двойной щелчок открывает файл.
-/// Кнопка «выше» или «ниже». Пока порядок не включён, её не видно.
-private func prepareOrder(_ button: NSButton, symbol: String, tip: String, target: AnyObject, action: Selector) {
-    button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)?
-        .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
-    button.imagePosition = .imageOnly
-    button.isBordered = false
-    button.contentTintColor = UtkaChrome.dim
-    button.toolTip = tip
-    button.target = target
-    button.action = action
-    button.isHidden = true
+/// Тень на время перетаскивания. Ноль — карточка снова лежит в слоте.
+func utkaLift(_ view: NSView, _ amount: CGFloat) {
+    let radius = view.layer?.cornerRadius ?? 8
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    view.layer?.shadowColor = NSColor.black.cgColor
+    view.layer?.shadowOpacity = Float(0.32 * amount)
+    view.layer?.shadowRadius = 12 * amount
+    view.layer?.shadowOffset = CGSize(width: 0, height: -4 * amount)
+    view.layer?.shadowPath = CGPath(
+        roundedRect: view.bounds,
+        cornerWidth: radius,
+        cornerHeight: radius,
+        transform: nil
+    )
+    CATransaction.commit()
 }
 
 final class FileCardView: NSView, NSDraggingSource {
@@ -335,10 +339,10 @@ final class FileCardView: NSView, NSDraggingSource {
     var onRemove: (() -> Void)?
     var onDrag: ((Bool) -> Void)?
     var onEdit: (() -> Void)? { didSet { updatePencil() } }
-    var onMoveUp: (() -> Void)? { didSet { refreshOrder() } }
-    var onMoveDown: (() -> Void)? { didSet { refreshOrder() } }
-    /// Кнопки порядка. У полки выключено, драг файла наружу не меняется.
-    var showsOrder = false { didSet { refreshOrder() } }
+    /// Захват порядка, как у строки раздела. У полки выключено, драг файла наружу не меняется.
+    var canReorder = false { didSet { refreshGrip() } }
+    var onReorderDrag: ((NSPoint) -> Void)?
+    var onReorderDrop: (() -> Void)?
     /// Полка: драг начался, это имя нельзя сразу забирать со стола.
     var onExportBegan: ((String) -> Void)?
     /// Полка: драг отменён, защиту имени можно снять.
@@ -350,9 +354,11 @@ final class FileCardView: NSView, NSDraggingSource {
     private let nameLabel = UtkaChrome.label("", size: 11, color: UtkaChrome.dim)
     private let removeButton = NSButton()
     private let editButton = NSButton()
-    private let upButton = NSButton()
-    private let downButton = NSButton()
+    private let grip = NSImageView()
     private var didDrag = false
+    private var reorderArmed = false
+    private var reorderMoved = false
+    private var reorderGrab = NSPoint.zero
     private var dragName: String?
     private var lastClickAt = Date.distantPast
     private var lastClickPoint = NSPoint.zero
@@ -382,14 +388,15 @@ final class FileCardView: NSView, NSDraggingSource {
         editButton.target = self
         editButton.action = #selector(editTapped)
         editButton.isHidden = true
-        prepareOrder(upButton, symbol: "chevron.up", tip: "Выше", target: self, action: #selector(moveUpTapped))
-        prepareOrder(downButton, symbol: "chevron.down", tip: "Ниже", target: self, action: #selector(moveDownTapped))
+        grip.image = utkaSymbol("line.3.horizontal", point: 11, label: "Перетащить")
+        grip.imageScaling = .scaleProportionallyDown
+        grip.toolTip = "Перетащить"
+        grip.isHidden = true
         addSubview(iconView)
         addSubview(nameLabel)
         addSubview(removeButton)
         addSubview(editButton)
-        addSubview(upButton)
-        addSubview(downButton)
+        addSubview(grip)
         NotificationCenter.default.addObserver(self, selector: #selector(retintCard), name: IslandLook.changed, object: nil)
         retintCard()
     }
@@ -400,18 +407,19 @@ final class FileCardView: NSView, NSDraggingSource {
         nameLabel.textColor = UtkaChrome.dim
         removeButton.contentTintColor = UtkaChrome.dim
         editButton.contentTintColor = UtkaChrome.ink
-        upButton.contentTintColor = upButton.isEnabled ? UtkaChrome.dim : UtkaChrome.dim.withAlphaComponent(0.35)
-        downButton.contentTintColor = downButton.isEnabled ? UtkaChrome.dim : UtkaChrome.dim.withAlphaComponent(0.35)
+        grip.contentTintColor = UtkaChrome.dim
     }
 
-    /// Показывает порядок только у заготовок. Крайние направления тусклые.
-    private func refreshOrder() {
-        upButton.isHidden = !showsOrder
-        downButton.isHidden = !showsOrder
-        upButton.isEnabled = onMoveUp != nil
-        downButton.isEnabled = onMoveDown != nil
-        retintCard()
+    /// Три полоски только там, где карточку можно переставить. Файл наружу тащится с превью.
+    private func refreshGrip() {
+        grip.isHidden = !canReorder
         needsLayout = true
+        window?.invalidateCursorRects(for: self)
+    }
+
+    /// Поднимает карточку, пока её тащат по сетке.
+    func setLift(_ amount: CGFloat) {
+        utkaLift(self, amount)
     }
 
     required init?(coder: NSCoder) { nil }
@@ -441,25 +449,36 @@ final class FileCardView: NSView, NSDraggingSource {
     override func layout() {
         super.layout()
         let labelH: CGFloat = 18
-        let orderPad: CGFloat = showsOrder ? 18 : 0
+        let gripPad: CGFloat = canReorder ? 16 : 0
         nameLabel.frame = NSRect(x: 6, y: 6, width: bounds.width - 12, height: labelH)
-        iconView.frame = NSRect(x: 18, y: labelH + 8 + orderPad, width: bounds.width - 36, height: max(12, bounds.height - labelH - 28 - orderPad))
+        grip.frame = NSRect(x: (bounds.width - 18) / 2, y: labelH + 2, width: 18, height: 14)
+        iconView.frame = NSRect(x: 18, y: labelH + 8 + gripPad, width: bounds.width - 36, height: max(12, bounds.height - labelH - 28 - gripPad))
         removeButton.frame = NSRect(x: bounds.width - 22, y: bounds.height - 20, width: 18, height: 18)
         editButton.frame = NSRect(x: 4, y: bounds.height - 20, width: 18, height: 18)
-        upButton.frame = NSRect(x: 4, y: 26, width: 16, height: 16)
-        downButton.frame = NSRect(x: 22, y: 26, width: 16, height: 16)
+    }
+
+    override func resetCursorRects() {
+        guard canReorder else { return }
+        addCursorRect(grip.frame.insetBy(dx: -4, dy: -4), cursor: .openHand)
     }
 
     /// Щелчок по превью и имени идёт в карточку. Крестик и карандаш остаются кнопками.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
-        if hit === removeButton || hit === editButton || hit === upButton || hit === downButton { return hit }
+        if hit === removeButton || hit === editButton { return hit }
         if hit.isDescendant(of: removeButton) || hit.isDescendant(of: editButton) { return hit }
-        if hit.isDescendant(of: upButton) || hit.isDescendant(of: downButton) { return hit }
         return self
     }
 
     override func mouseDown(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        if canReorder, grip.frame.insetBy(dx: -4, dy: -4).contains(local) {
+            reorderArmed = true
+            reorderMoved = false
+            reorderGrab = NSPoint(x: local.x, y: bounds.height - local.y)
+            return
+        }
+        reorderArmed = false
         didDrag = false
         let now = Date()
         let near = hypot(event.locationInWindow.x - lastClickPoint.x, event.locationInWindow.y - lastClickPoint.y) < 6
@@ -474,6 +493,10 @@ final class FileCardView: NSView, NSDraggingSource {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if reorderArmed {
+            dragReorder(with: event)
+            return
+        }
         guard !didDrag, let url = fileURL else { return }
         didDrag = true
         dragName = url.lastPathComponent
@@ -502,6 +525,26 @@ final class FileCardView: NSView, NSDraggingSource {
         if consumeOnDrop { onConsume?() }
     }
 
+    override func mouseUp(with event: NSEvent) {
+        guard reorderArmed else { return }
+        reorderArmed = false
+        guard reorderMoved else { return }
+        reorderMoved = false
+        NSCursor.pop()
+        onReorderDrop?()
+    }
+
+    /// Тащит карточку за три полоски. Превью по-прежнему уносит файл наружу.
+    private func dragReorder(with event: NSEvent) {
+        guard let parent = superview else { return }
+        if !reorderMoved {
+            reorderMoved = true
+            NSCursor.closedHand.push()
+        }
+        let point = parent.convert(event.locationInWindow, from: nil)
+        onReorderDrag?(NSPoint(x: point.x - reorderGrab.x, y: point.y - reorderGrab.y))
+    }
+
     /// Открывает файл той программой, которую Мак выбрал для этого типа. PDF — как обычный PDF.
     private func openFile() {
         guard let url = fileURL, FileManager.default.fileExists(atPath: url.path) else { return }
@@ -514,14 +557,6 @@ final class FileCardView: NSView, NSDraggingSource {
 
     @objc private func editTapped() {
         onEdit?()
-    }
-
-    @objc private func moveUpTapped() {
-        onMoveUp?()
-    }
-
-    @objc private func moveDownTapped() {
-        onMoveDown?()
     }
 }
 
@@ -537,6 +572,7 @@ final class SelectableTextView: NSTextView {
 }
 
 /// Строка текста: клик по строке или иконка копирует всё, шеврон раскрывает текст для частичного копирования.
+/// В закрепах строку перетаскивают целиком, как раздел в настройках.
 final class TextRowView: NSView {
     static let collapsedHeight: CGFloat = 48
     static let expandedHeight: CGFloat = 172
@@ -544,10 +580,10 @@ final class TextRowView: NSView {
     var onClick: (() -> Void)?
     var onDelete: (() -> Void)?
     var onToggle: (() -> Void)?
-    var onMoveUp: (() -> Void)? { didSet { refreshOrder() } }
-    var onMoveDown: (() -> Void)? { didSet { refreshOrder() } }
-    /// Кнопки порядка. У буфера выключено, строка остаётся прежней.
-    var showsOrder = false { didSet { refreshOrder() } }
+    /// Захват порядка. У буфера выключено, строка остаётся прежней.
+    var canReorder = false { didSet { refreshGrip() } }
+    var onReorderDrag: ((CGFloat) -> Void)?
+    var onReorderDrop: (() -> Void)?
     var onCopySelection: ((String) -> Void)?
     var onSelecting: ((Bool) -> Void)? {
         didSet { textView.onSelecting = onSelecting }
@@ -564,9 +600,12 @@ final class TextRowView: NSView {
     private let deleteButton = NSButton()
     private let copyButton = NSButton()
     private let expandButton = NSButton()
-    private let upButton = NSButton()
-    private let downButton = NSButton()
+    private let grip = NSImageView()
     private let selectionButton = NSButton()
+    private var reorderArmed = false
+    private var reorderMoved = false
+    private var reorderGrab: CGFloat = 0
+    private var pressPoint = NSPoint.zero
     private let collapseButton = NSButton()
     private let textScroll = NSScrollView()
     private let textView = SelectableTextView()
@@ -584,8 +623,10 @@ final class TextRowView: NSView {
         deleteButton.action = #selector(deleteTapped)
         styleIcon(copyButton, symbol: "doc.on.doc", tip: "Копировать всё", action: #selector(copyTapped))
         styleIcon(expandButton, symbol: "chevron.down", tip: "Раскрыть", action: #selector(toggleTapped))
-        prepareOrder(upButton, symbol: "chevron.up", tip: "Выше", target: self, action: #selector(moveUpTapped))
-        prepareOrder(downButton, symbol: "chevron.down", tip: "Ниже", target: self, action: #selector(moveDownTapped))
+        grip.image = utkaSymbol("line.3.horizontal", point: 12, label: "Перетащить")
+        grip.imageScaling = .scaleProportionallyDown
+        grip.toolTip = "Перетащить"
+        grip.isHidden = true
         selectionButton.title = "Копировать выделенное"
         selectionButton.bezelStyle = .rounded
         selectionButton.controlSize = .small
@@ -619,8 +660,7 @@ final class TextRowView: NSView {
         addSubview(copyButton)
         addSubview(expandButton)
         addSubview(deleteButton)
-        addSubview(upButton)
-        addSubview(downButton)
+        addSubview(grip)
         addSubview(textScroll)
         addSubview(selectionButton)
         addSubview(collapseButton)
@@ -637,8 +677,7 @@ final class TextRowView: NSView {
         deleteButton.contentTintColor = UtkaChrome.dim
         copyButton.contentTintColor = UtkaChrome.dim
         expandButton.contentTintColor = isExpanded ? UtkaChrome.ink : UtkaChrome.dim
-        upButton.contentTintColor = upButton.isEnabled ? UtkaChrome.dim : UtkaChrome.dim.withAlphaComponent(0.35)
-        downButton.contentTintColor = downButton.isEnabled ? UtkaChrome.dim : UtkaChrome.dim.withAlphaComponent(0.35)
+        grip.contentTintColor = UtkaChrome.dim
         textView.textColor = UtkaChrome.ink
         textView.insertionPointColor = UtkaChrome.ink
         textView.selectedTextAttributes = [.backgroundColor: UtkaChrome.dim]
@@ -678,14 +717,17 @@ final class TextRowView: NSView {
         needsLayout = true
     }
 
-    /// Показывает порядок только у заметок. Крайние направления тусклые.
-    private func refreshOrder() {
-        upButton.isHidden = !showsOrder
-        downButton.isHidden = !showsOrder
-        upButton.isEnabled = onMoveUp != nil
-        downButton.isEnabled = onMoveDown != nil
+    /// Три полоски только у закреп, где строк больше одной.
+    private func refreshGrip() {
+        grip.isHidden = !canReorder
         retintRow()
         needsLayout = true
+        window?.invalidateCursorRects(for: self)
+    }
+
+    /// Поднимает строку, пока её тащат.
+    func setLift(_ amount: CGFloat) {
+        utkaLift(self, amount)
     }
 
     override func layout() {
@@ -696,10 +738,8 @@ final class TextRowView: NSView {
         deleteButton.frame = NSRect(x: bounds.width - 28, y: mid, width: 22, height: 18)
         expandButton.frame = NSRect(x: bounds.width - 54, y: mid, width: 22, height: 18)
         copyButton.frame = NSRect(x: bounds.width - 80, y: mid, width: 22, height: 18)
-        let orderShift: CGFloat = showsOrder ? 52 : 0
-        upButton.frame = NSRect(x: bounds.width - 132, y: mid, width: 22, height: 18)
-        downButton.frame = NSRect(x: bounds.width - 106, y: mid, width: 22, height: 18)
-        let textW = bounds.width - 96 - orderShift
+        grip.frame = NSRect(x: bounds.width - 106, y: mid, width: 22, height: 18)
+        let textW = bounds.width - 96 - (canReorder ? 26 : 0)
         if isExpanded || detailLabel.isHidden {
             titleLabel.frame = NSRect(x: 10, y: top + (head - 18) / 2, width: textW, height: 18)
         } else {
@@ -715,10 +755,52 @@ final class TextRowView: NSView {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    override func resetCursorRects() {
+        guard canReorder, !isExpanded else { return }
+        let drag = NSRect(x: 0, y: bounds.height - TextRowView.collapsedHeight, width: grip.frame.minX, height: TextRowView.collapsedHeight)
+        addCursorRect(drag, cursor: .openHand)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        guard canReorder, !isExpanded else { return hit }
+        let controls = [deleteButton, copyButton, expandButton]
+        if controls.contains(where: { hit === $0 || hit.isDescendant(of: $0) }) { return hit }
+        return self
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        reorderMoved = false
+        reorderArmed = canReorder && !isExpanded && local.y >= bounds.height - TextRowView.collapsedHeight
+        pressPoint = local
+        reorderGrab = bounds.height - local.y
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard reorderArmed, let parent = superview else { return }
+        let local = convert(event.locationInWindow, from: nil)
+        if !reorderMoved {
+            guard hypot(local.x - pressPoint.x, local.y - pressPoint.y) > 4 else { return }
+            reorderMoved = true
+            NSCursor.closedHand.push()
+        }
+        let point = parent.convert(event.locationInWindow, from: nil)
+        onReorderDrag?(point.y - reorderGrab)
+    }
+
     override func mouseUp(with event: NSEvent) {
+        if reorderMoved {
+            reorderMoved = false
+            reorderArmed = false
+            NSCursor.pop()
+            onReorderDrop?()
+            return
+        }
+        reorderArmed = false
         let point = convert(event.locationInWindow, from: nil)
         guard bounds.contains(point), point.y >= bounds.height - TextRowView.collapsedHeight else { return }
-        let controls = [deleteButton, copyButton, expandButton, upButton, downButton]
+        let controls = [deleteButton, copyButton, expandButton]
         guard !controls.contains(where: { !$0.isHidden && $0.frame.contains(point) }) else { return }
         flash()
         onClick?()
@@ -750,14 +832,6 @@ final class TextRowView: NSView {
 
     @objc private func deleteTapped() {
         onDelete?()
-    }
-
-    @objc private func moveUpTapped() {
-        onMoveUp?()
-    }
-
-    @objc private func moveDownTapped() {
-        onMoveDown?()
     }
 }
 
