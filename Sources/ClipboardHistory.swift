@@ -7,18 +7,138 @@ struct ClipItem: Codable, Equatable {
     var copiedAt: Date?
 }
 
+/// Настройки истории буфера. Все ключи UserDefaults буфера — только здесь.
+struct ClipboardPrefs {
+    /// В чём считается срок хранения.
+    enum Unit: Int, CaseIterable {
+        case minutes, hours, days
+
+        /// Подпись в выборе единицы.
+        var title: String {
+            switch self {
+            case .minutes: return "минут"
+            case .hours: return "часов"
+            case .days: return "дней"
+            }
+        }
+
+        /// Секунд в одной единице.
+        var seconds: TimeInterval {
+            switch self {
+            case .minutes: return 60
+            case .hours: return 3_600
+            case .days: return 86_400
+            }
+        }
+    }
+
+    /// Ключи UserDefaults буфера.
+    private enum Key: String {
+        case remember = "clipboardRemember"
+        case skipSecrets = "clipboardSkipSecrets"
+        case expires = "clipboardExpires"
+        case ageCount = "clipboardAgeCount"
+        case ageUnit = "clipboardAgeUnit"
+        case clearOnReboot = "clipboardClearOnReboot"
+        case confirmClear = "clipboardConfirmClear"
+        case bootTime = "clipboardBootTime"
+    }
+
+    /// Допустимое число единиц срока.
+    static let ageRange = 1...999
+
+    /// Где лежат настройки. У самопроверки — свой отдельный набор.
+    let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    /// «Запоминать скопированное». Без ключа — да.
+    var remember: Bool {
+        get { flag(.remember, fallback: true) }
+        nonmutating set { store(newValue, .remember) }
+    }
+
+    /// «Не сохранять пароли». Без ключа — да.
+    var skipSecrets: Bool {
+        get { flag(.skipSecrets, fallback: true) }
+        nonmutating set { store(newValue, .skipSecrets) }
+    }
+
+    /// «Удалять записи старше». Без ключа — да.
+    var expires: Bool {
+        get { flag(.expires, fallback: true) }
+        nonmutating set { store(newValue, .expires) }
+    }
+
+    /// Сколько единиц живёт запись. Без ключа — 7. Число вне 1–999 не сохраняется.
+    var ageCount: Int {
+        get {
+            let stored = defaults.integer(forKey: Key.ageCount.rawValue)
+            return Self.ageRange.contains(stored) ? stored : 7
+        }
+        nonmutating set {
+            guard Self.ageRange.contains(newValue) else { return }
+            store(newValue, .ageCount)
+        }
+    }
+
+    /// Единица срока. Без ключа — дни.
+    var ageUnit: Unit {
+        get { (defaults.object(forKey: Key.ageUnit.rawValue) as? Int).flatMap(Unit.init(rawValue:)) ?? .days }
+        nonmutating set { store(newValue.rawValue, .ageUnit) }
+    }
+
+    /// «Чистить после перезагрузки Мака». Без ключа — нет.
+    var clearOnReboot: Bool {
+        get { flag(.clearOnReboot, fallback: false) }
+        nonmutating set { store(newValue, .clearOnReboot) }
+    }
+
+    /// «Спрашивать перед очисткой». Без ключа — да.
+    var confirmClear: Bool {
+        get { flag(.confirmClear, fallback: true) }
+        nonmutating set { store(newValue, .confirmClear) }
+    }
+
+    /// Время загрузки системы, которое застал прошлый запуск утки.
+    var bootTime: Double? {
+        get { defaults.object(forKey: Key.bootTime.rawValue) as? Double }
+        nonmutating set { store(newValue, .bootTime) }
+    }
+
+    /// Сколько секунд живёт запись. nil — срок выключен.
+    var lifetime: TimeInterval? {
+        expires ? TimeInterval(ageCount) * ageUnit.seconds : nil
+    }
+
+    /// Флажок, а пока ключа нет — значение по умолчанию.
+    private func flag(_ key: Key, fallback: Bool) -> Bool {
+        defaults.object(forKey: key.rawValue) as? Bool ?? fallback
+    }
+
+    /// Пишет значение. nil стирает ключ.
+    private func store(_ value: Any?, _ key: Key) {
+        defaults.set(value, forKey: key.rawValue)
+    }
+}
+
 /// История скопированного текста. Картинки и файлы сюда не попадают.
 final class ClipboardHistory {
     private(set) var items: [ClipItem] = []
     var onChange: (() -> Void)?
+    /// Настройки, по которым живёт эта история.
+    let prefs: ClipboardPrefs
 
     private let storeURL: URL
     private var lastCount: Int
     private var bypass = false
     private var timer: Timer?
 
-    init(storeURL: URL) {
+    init(storeURL: URL, prefs: ClipboardPrefs = ClipboardPrefs()) {
         self.storeURL = storeURL
+        self.prefs = prefs
         lastCount = NSPasteboard.general.changeCount
         load()
     }
