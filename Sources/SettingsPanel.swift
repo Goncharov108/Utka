@@ -184,15 +184,7 @@ final class SettingsPanel: NSObject {
         shotCleanup.target = self
         shotCleanup.action = #selector(shotCleanupToggled)
         shotCleanup.state = ShelfModel.deleteShotAfterUse ? .on : .off
-        shotDisposal.segmentCount = ShotDisposal.allCases.count
-        for (index, option) in ShotDisposal.allCases.enumerated() {
-            shotDisposal.setLabel(option.title, forSegment: index)
-        }
-        shotDisposal.trackingMode = .selectOne
-        shotDisposal.segmentDistribution = .fillEqually
-        shotDisposal.font = UtkaChrome.font(12, weight: .medium)
-        shotDisposal.target = self
-        shotDisposal.action = #selector(shotDisposalChanged)
+        segments(shotDisposal, ShotDisposal.allCases.map(\.title), action: #selector(shotDisposalChanged))
         refreshShotDisposal()
         soundNote.maximumNumberOfLines = 3
         soundNote.lineBreakMode = .byWordWrapping
@@ -200,15 +192,7 @@ final class SettingsPanel: NSObject {
         mount(soundInstall, title: "Установить плагин звука", action: #selector(installSoundPlugin))
         wire(soundSwitch, action: #selector(soundToggled))
         wire(searchSwitch, action: #selector(searchToggled))
-        lookMode.segmentCount = 3
-        lookMode.setLabel("Как в системе", forSegment: 0)
-        lookMode.setLabel("Светлая", forSegment: 1)
-        lookMode.setLabel("Тёмная", forSegment: 2)
-        lookMode.trackingMode = .selectOne
-        lookMode.segmentDistribution = .fillEqually
-        lookMode.font = UtkaChrome.font(12, weight: .medium)
-        lookMode.target = self
-        lookMode.action = #selector(lookModeChanged)
+        segments(lookMode, ["Как в системе", "Светлая", "Тёмная"], action: #selector(lookModeChanged))
         lookMode.selectedSegment = IslandLook.mode.rawValue
         glassSlider.minValue = 0
         glassSlider.maxValue = 1
@@ -585,6 +569,19 @@ final class SettingsPanel: NSObject {
     private func wire(_ toggle: NSSwitch, action: Selector) {
         toggle.target = self
         toggle.action = action
+    }
+
+    /// Выбор одного из вариантов тем же гротеском, что и окно.
+    private func segments(_ control: NSSegmentedControl, _ labels: [String], action: Selector) {
+        control.segmentCount = labels.count
+        for (index, label) in labels.enumerated() {
+            control.setLabel(label, forSegment: index)
+        }
+        control.trackingMode = .selectOne
+        control.segmentDistribution = .fillEqually
+        control.font = UtkaChrome.font(12, weight: .medium)
+        control.target = self
+        control.action = action
     }
 
     /// Свой офлайн-движок перевода: utka-apps/utka-translate. Единственный
