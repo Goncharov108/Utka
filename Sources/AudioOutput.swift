@@ -44,7 +44,12 @@ final class AudioOutput {
         listen(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDevices, add: true)
         listen(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice, add: true)
         refreshFromHardware()
-        requestListenAccess()
+        if pluginPresent { requestListenAccess() }
+    }
+
+    /// Плагин «Утка звук» стоит в системной папке или его устройство уже видно.
+    private var pluginPresent: Bool {
+        SoundPlugin.isInstalled || deviceID(forUID: virtualUID) != 0
     }
 
     /// macOS считает петлю «Утка звук» микрофоном. Пока доступ не дан, системный выход не переключаем.
