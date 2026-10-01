@@ -34,12 +34,26 @@ struct ShelfRecord: Codable, Equatable {
     var path: String
 }
 
+/// Куда деть файл своего снимка, когда карточка уходит с полки. Числа лежат в настройках, их не менять.
+enum ShotDisposal: Int, CaseIterable {
+    case trash = 0
+    case forever = 1
+
+    var title: String {
+        switch self {
+        case .trash: return "В корзину"
+        case .forever: return "Навсегда"
+        }
+    }
+}
+
 /// Временная полка файлов и свежих скриншотов.
 final class ShelfModel {
     private(set) var records: [ShelfRecord] = []
     var onChange: (() -> Void)?
 
     private static let deleteShotAfterUseKey = "deleteShotAfterUse"
+    private static let shotDisposalKey = "shotDisposal"
 
     /// Снимать свой снимок с полки после удачного переноса. Без ключа — да.
     static var deleteShotAfterUse: Bool {
@@ -47,10 +61,22 @@ final class ShelfModel {
         return UserDefaults.standard.bool(forKey: deleteShotAfterUseKey)
     }
 
+    /// Куда девать файл. Без ключа — стереть, как раньше. Непонятное число — в корзину, чтобы не потерять.
+    static var shotDisposal: ShotDisposal {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: shotDisposalKey) != nil else { return .forever }
+        return ShotDisposal(rawValue: defaults.integer(forKey: shotDisposalKey)) ?? .trash
+    }
+
     /// Запоминает галочку и пересобирает карточки.
     func setDeleteShotAfterUse(_ on: Bool) {
         UserDefaults.standard.set(on, forKey: Self.deleteShotAfterUseKey)
         onChange?()
+    }
+
+    /// Запоминает корзину или полное стирание.
+    func setShotDisposal(_ disposal: ShotDisposal) {
+        UserDefaults.standard.set(disposal.rawValue, forKey: Self.shotDisposalKey)
     }
 
     private let storeURL: URL
@@ -88,8 +114,7 @@ final class ShelfModel {
 
     func remove(id: String) {
         if let record = records.first(where: { $0.id == id }), UtkaPaths.ownsShot(record.path) {
-            ShotStore.discard(beside: record.path)
-            try? FileManager.default.removeItem(atPath: record.path)
+            disposeOwnedShot(record.path)
         }
         records.removeAll { $0.id == id }
         save()
@@ -133,7 +158,7 @@ final class ShelfModel {
         BookmarkStore.locate(bookmark: record.bookmark, path: record.path, name: record.name)
     }
 
-    /// Новые скриншоты пишутся в папку утки, а не на стол. Удаление карточки стирает файл.
+    /// Новые скриншоты пишутся в папку утки, а не на стол. Файл уходит в корзину или стирается, как выбрано.
     func startScreenshotWatch() {
         guard watchers.isEmpty else { return }
         let shots = UtkaPaths.shots
@@ -366,7 +391,7 @@ final class ShelfModel {
             }
             guard !OpenFile.othersHold(path) else { return }
             if self?.desktopCopyIncomplete(name: name, sourceSize: sourceSize) == true { return }
-            self?.deleteOwnedShot(path)
+            self?.disposeOwnedShot(path)
         }
     }
 
@@ -383,17 +408,27 @@ final class ShelfModel {
         return !pngHeader(dest)
     }
 
-    private func deleteOwnedShot(_ path: String) {
+    /// Файл своего снимка: в корзину или навсегда, как выбрано в настройках.
+    private func disposeOwnedShot(_ path: String) {
+        guard FileManager.default.fileExists(atPath: path) else { return }
         let url = URL(fileURLWithPath: path)
         var error: NSError?
         NSFileCoordinator().coordinate(writingItemAt: url, options: .forDeleting, error: &error) { target in
             guard !OpenFile.othersHold(target.path) else { return }
-            ShotStore.discard(beside: target.path)
-            try? FileManager.default.removeItem(at: target)
+            self.eraseShot(at: target)
         }
         if error != nil, FileManager.default.fileExists(atPath: path), !OpenFile.othersHold(path) {
-            ShotStore.discard(beside: path)
-            try? FileManager.default.removeItem(atPath: path)
+            eraseShot(at: url)
+        }
+    }
+
+    /// Пометки рядом стирает всегда. Сам снимок — как выбрано в настройках.
+    private func eraseShot(at url: URL) {
+        ShotStore.discard(beside: url.path)
+        if Self.shotDisposal == .trash {
+            try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        } else {
+            try? FileManager.default.removeItem(at: url)
         }
     }
 
@@ -417,7 +452,7 @@ private enum DesktopShotReadiness {
     case ready
 }
 
-/// Полка: бросил файл — карточка, утащил — файл уходит и карточка снимается.
+/// Полка: бросил файл — карточка, утащил наружу — карточка снимается. Вернул на полку — остаётся.
 final class ShelfView: NSView {
     var onDrag: ((Bool) -> Void)?
     private let model: ShelfModel
@@ -465,6 +500,7 @@ final class ShelfView: NSView {
             card.onExportBegan = { [weak self] name in self?.model.protectDesktopName(name) }
             card.onExportCancel = { [weak self] name in self?.model.releaseDesktopName(name) }
             card.onConsume = { [weak self] in self?.model.consumeDropped(id: record.id) }
+            card.cardStaysOnDrop = { [weak self] point in self?.containsScreenPoint(point) ?? true }
             card.onRemove = { [weak self] in self?.model.remove(id: record.id) }
             if let url = model.url(for: record) {
                 card.onEdit = { ShotEditor.open(url: url) }
@@ -486,15 +522,32 @@ final class ShelfView: NSView {
         document.frame = NSRect(x: 0, y: 0, width: max(x, 1), height: height)
     }
 
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
-    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
-    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { true }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { dropOperation(for: sender) }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { dropOperation(for: sender) }
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { dropOperation(for: sender) == .copy }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard dropOperation(for: sender) == .copy else { return false }
         let urls = fileURLs(from: sender.draggingPasteboard)
         guard !urls.isEmpty else { return false }
         model.add(urls: urls)
         return true
+    }
+
+    /// Чужой файл принимаем. Свой, который вернули на полку, не считаем переносом.
+    private func dropOperation(for sender: NSDraggingInfo) -> NSDragOperation {
+        guard let card = sender.draggingSource as? FileCardView,
+              let path = card.fileURL?.standardizedFileURL.path else { return .copy }
+        let home = model.records.contains {
+            URL(fileURLWithPath: $0.path).standardizedFileURL.path == path
+        }
+        return home ? [] : .copy
+    }
+
+    /// Точка на экране попала в эту полку.
+    private func containsScreenPoint(_ screenPoint: NSPoint) -> Bool {
+        guard let window else { return false }
+        return window.convertToScreen(convert(bounds, to: nil)).contains(screenPoint)
     }
 
     private func fileURLs(from pasteboard: NSPasteboard) -> [URL] {

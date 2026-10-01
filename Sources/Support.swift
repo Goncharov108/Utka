@@ -349,6 +349,8 @@ final class FileCardView: NSView, NSDraggingSource {
     var onExportCancel: ((String) -> Void)?
     /// Полка: дроп удался. Карточка уходит, файл стирается, когда получатель его отпустил.
     var onConsume: (() -> Void)?
+    /// Отпускание над полкой — файл просто вернули. Карточку не снимаем.
+    var cardStaysOnDrop: ((NSPoint) -> Bool)?
 
     private let iconView = NSImageView()
     private let nameLabel = UtkaChrome.label("", size: 11, color: UtkaChrome.dim)
@@ -517,8 +519,9 @@ final class FileCardView: NSView, NSDraggingSource {
         let name = dragName
         dragName = nil
         // Удачный перенос без снятия карточки — не отмена: имя на столе остаётся под защитой,
-        // иначе копия возвращается на полку вторым снимком.
-        guard !operation.isEmpty else {
+        // иначе копия возвращается на полку вторым снимком. Отпускание над полкой — тоже отмена.
+        let returned = cardStaysOnDrop?(screenPoint) ?? false
+        guard !operation.isEmpty, !returned else {
             if let name { onExportCancel?(name) }
             return
         }

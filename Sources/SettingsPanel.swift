@@ -55,6 +55,8 @@ private enum SettingsPage: Int {
 final class SettingsPanel: NSObject {
     /// Сообщает полке, снимать ли свой снимок после переноса.
     var onDeleteShotAfterUse: ((Bool) -> Void)?
+    /// Что делать с файлом снимка: оставить, в корзину или навсегда.
+    var onShotDisposal: ((ShotDisposal) -> Void)?
     /// Меняет верхнюю полосу островка.
     var onIslandBar: (() -> Void)?
 
@@ -102,8 +104,10 @@ final class SettingsPanel: NSObject {
     private let restoreButton = NSButton()
     private let updateLine = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
     private let installButton = NSButton()
-    private let shotCleanupLabel = UtkaChrome.label("Удалять скрин из полки после использования", size: 13)
+    private let shotCleanupLabel = UtkaChrome.label("Удалять скрин из полки\nпосле использования", size: 13)
     private let shotCleanup = NSSwitch()
+    private let shotDisposalLabel = UtkaChrome.label("Удалять скрин из полки", size: 13)
+    private let shotDisposal = NSSegmentedControl()
     private let soundLabel = UtkaChrome.label("Звук", size: 13, weight: .semibold)
     private let soundSwitch = NSSwitch()
     private let soundCaption = UtkaChrome.label(
@@ -172,12 +176,20 @@ final class SettingsPanel: NSObject {
         mount(updateButton, title: "Проверить обновления", action: #selector(checkUpdates))
         mount(restoreButton, title: "Вернуть предыдущую", action: #selector(restorePrevious))
         mount(installButton, title: "Установить", action: #selector(installUpdate))
-        shotCleanupLabel.maximumNumberOfLines = 2
-        shotCleanupLabel.lineBreakMode = .byWordWrapping
-        shotCleanupLabel.cell?.wraps = true
+        allowWrap(shotCleanupLabel)
         shotCleanup.target = self
         shotCleanup.action = #selector(shotCleanupToggled)
         shotCleanup.state = ShelfModel.deleteShotAfterUse ? .on : .off
+        shotDisposal.segmentCount = ShotDisposal.allCases.count
+        for (index, option) in ShotDisposal.allCases.enumerated() {
+            shotDisposal.setLabel(option.title, forSegment: index)
+        }
+        shotDisposal.trackingMode = .selectOne
+        shotDisposal.segmentDistribution = .fillEqually
+        shotDisposal.font = UtkaChrome.font(12, weight: .medium)
+        shotDisposal.target = self
+        shotDisposal.action = #selector(shotDisposalChanged)
+        refreshShotDisposal()
         soundCaption.maximumNumberOfLines = 4
         soundCaption.lineBreakMode = .byWordWrapping
         soundCaption.cell?.wraps = true
@@ -275,6 +287,8 @@ final class SettingsPanel: NSObject {
         body.addSubview(installButton)
         body.addSubview(shotCleanupLabel)
         body.addSubview(shotCleanup)
+        body.addSubview(shotDisposalLabel)
+        body.addSubview(shotDisposal)
         body.addSubview(soundLabel)
         body.addSubview(soundSwitch)
         body.addSubview(soundCaption)
@@ -317,6 +331,7 @@ final class SettingsPanel: NSObject {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(body)
         shotCleanup.state = ShelfModel.deleteShotAfterUse ? .on : .off
+        refreshShotDisposal()
         refreshIslandSwitches()
         refreshNative()
         select(.theme, animated: false)
@@ -375,6 +390,9 @@ final class SettingsPanel: NSObject {
         let shot = page == .shot
         shotCleanupLabel.isHidden = !shot
         shotCleanup.isHidden = !shot
+        let disposal = shot && shotCleanup.state == .on
+        shotDisposalLabel.isHidden = !disposal
+        shotDisposal.isHidden = !disposal
         let sound = page == .sound
         let plugged = SoundPlugin.isInstalled
         soundLabel.isHidden = !sound
@@ -511,6 +529,20 @@ final class SettingsPanel: NSObject {
     /// Запоминает, снимать ли свой снимок с полки после переноса.
     @objc private func shotCleanupToggled() {
         onDeleteShotAfterUse?(shotCleanup.state == .on)
+        applyPageVisibility()
+        body.needsLayout = true
+    }
+
+    /// В корзину или стереть навсегда.
+    @objc private func shotDisposalChanged() {
+        let options = ShotDisposal.allCases
+        guard options.indices.contains(shotDisposal.selectedSegment) else { return }
+        onShotDisposal?(options[shotDisposal.selectedSegment])
+    }
+
+    /// Ставит сегмент по сохранённому выбору.
+    private func refreshShotDisposal() {
+        shotDisposal.selectedSegment = ShotDisposal.allCases.firstIndex(of: ShelfModel.shotDisposal) ?? 0
     }
 
     /// Включает источники звука на полосе. Поиск не трогает.
@@ -1123,7 +1155,7 @@ final class SettingsPanel: NSObject {
         window.backgroundColor = .clear
         chrome.apply()
         strokeOverlay.needsDisplay = true
-        let inkLabels = [titleLabel, soundLabel, searchLabel, soundReady, nativeReady, nativeTitle, versionLabel, shotCleanupLabel, lookLabel, glassLabel, accentLabel, strokeLabel, strokeColorLabel]
+        let inkLabels = [titleLabel, soundLabel, searchLabel, soundReady, nativeReady, nativeTitle, versionLabel, shotCleanupLabel, shotDisposalLabel, lookLabel, glassLabel, accentLabel, strokeLabel, strokeColorLabel]
         inkLabels.forEach { $0.textColor = UtkaChrome.ink }
         let dimLabels = [soundCaption, soundNote, nativeNote, nativeState, updateLine]
         dimLabels.forEach { $0.textColor = UtkaChrome.dim }
@@ -1230,26 +1262,47 @@ final class SettingsPanel: NSObject {
         return y
     }
 
-    /// Подпись слева, боковой тумблер справа.
+    /// Тумблер про карточку. Выбор, куда девать файл, — только когда карточка уходит.
     private func layoutShot(text: NSRect, y: CGFloat) -> CGFloat {
-        let switchSize = shotCleanup.fittingSize
+        var y = layoutWrappedToggle(shotCleanupLabel, shotCleanup, text: text, y: y)
+        guard shotCleanup.state == .on else { return y + 8 }
+        y += 18
+        shotDisposalLabel.frame = NSRect(x: text.minX, y: y, width: text.width, height: 18)
+        y += 26
+        shotDisposal.frame = NSRect(x: text.minX, y: y, width: min(280, text.width), height: 24)
+        return y + 32
+    }
+
+    /// Длинная подпись переносится, а не обрезается многоточием.
+    private func layoutWrappedToggle(_ label: NSTextField, _ toggle: NSSwitch, text: NSRect, y: CGFloat) -> CGFloat {
+        let switchSize = toggle.fittingSize
         let gap: CGFloat = 12
         let labelWidth = max(80, text.width - switchSize.width - gap)
-        let measured = (shotCleanupLabel.stringValue as NSString).boundingRect(
-            with: NSSize(width: labelWidth, height: 44),
+        label.preferredMaxLayoutWidth = labelWidth
+        let measured = (label.stringValue as NSString).boundingRect(
+            with: NSSize(width: labelWidth, height: 48),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: shotCleanupLabel.font as Any]
+            attributes: [.font: label.font as Any]
         )
         let labelHeight = max(18, ceil(measured.height))
         let row = max(labelHeight, switchSize.height)
-        shotCleanupLabel.frame = NSRect(x: text.minX, y: y + (row - labelHeight) / 2, width: labelWidth, height: labelHeight)
-        shotCleanup.frame = NSRect(
+        label.frame = NSRect(x: text.minX, y: y + (row - labelHeight) / 2, width: labelWidth, height: labelHeight)
+        toggle.frame = NSRect(
             x: text.maxX - switchSize.width,
             y: y + (row - switchSize.height) / 2,
             width: switchSize.width,
             height: switchSize.height
         )
         return y + row
+    }
+
+    /// Поле-подпись по умолчанию в одну строку. Здесь нужно две.
+    private func allowWrap(_ label: NSTextField) {
+        label.maximumNumberOfLines = 2
+        label.lineBreakMode = .byWordWrapping
+        label.cell?.wraps = true
+        label.cell?.usesSingleLineMode = false
+        label.cell?.isScrollable = false
     }
 
     /// Держит верх окна на месте. Высота ставится кадром, без системного аниматора.
