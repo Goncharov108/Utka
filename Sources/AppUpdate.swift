@@ -5,6 +5,10 @@ enum AppUpdate {
     struct Report {
         var text: String
         var canInstall: Bool
+        /// true — свежая сверка подтвердила, что новее на main ничего нет.
+        /// Не просто «canInstall == false»: так тоже помечаются сбои сверки
+        /// (нет сети, нет папки и т.д.), их зелёным красить не нужно.
+        var isUpToDate: Bool = false
     }
 
     /// Номер с общего main и текст, что лежит в этом обновлении.
@@ -33,7 +37,8 @@ enum AppUpdate {
         guard isNewer(remoteNote.version, than: current) else {
             return Report(
                 text: "Сейчас \(currentLabel)\nОбновлений нет — у вас последняя версия",
-                canInstall: false
+                canInstall: false,
+                isUpToDate: true
             )
         }
         var lines = ["Сейчас \(currentLabel)", "Новая \(withVee(remoteNote.version))"]
