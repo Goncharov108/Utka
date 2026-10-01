@@ -16,29 +16,62 @@ func alarmLabel(_ date: Date) -> String {
 
 /// Всплывающий выбор даты и времени для будильника заметки.
 /// Один и тот же попап годится и для новой заметки, и для правки существующей.
+///
+/// Календарь и часы в одном узком виджете (.clockAndCalendar с обоими
+/// элементами) не помещались — пропадала шапка с месяцем и подсветка
+/// сегодняшнего дня. Разнёс на два отдельных пикера: полноразмерный
+/// календарь сверху и числовое поле времени со стрелками снизу.
 final class AlarmPopover: NSObject, NSPopoverDelegate {
     private let popover = NSPopover()
-    private let picker = NSDatePicker()
+    private let calendarPicker = NSDatePicker()
+    private let timePicker = NSDatePicker()
     private var onPick: ((Date?) -> Void)?
 
     /// view — якорь попапа. initial — текущая дата будильника, если уже стоит.
     func show(from view: NSView, initial: Date?, onPick: @escaping (Date?) -> Void) {
         self.onPick = onPick
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 150))
-        picker.datePickerStyle = .clockAndCalendar
-        picker.datePickerElements = [.yearMonthDay, .hourMinute]
-        picker.minDate = Date().addingTimeInterval(-60)
-        picker.dateValue = initial ?? Date().addingTimeInterval(600)
-        picker.frame = NSRect(x: 10, y: 44, width: 200, height: 96)
-        root.addSubview(picker)
+        let initialDate = initial ?? Date().addingTimeInterval(600)
+
+        calendarPicker.datePickerStyle = .clockAndCalendar
+        calendarPicker.datePickerElements = [.yearMonthDay]
+        calendarPicker.datePickerMode = .single
+        calendarPicker.minDate = Calendar.current.startOfDay(for: Date())
+        calendarPicker.dateValue = initialDate
+        calendarPicker.sizeToFit()
+
+        timePicker.datePickerStyle = .textFieldAndStepper
+        timePicker.datePickerElements = [.hourMinute]
+        timePicker.dateValue = initialDate
+        timePicker.sizeToFit()
+
+        let pad: CGFloat = 12
+        let calSize = calendarPicker.frame.size
+        let width = max(calSize.width, 200) + pad * 2
+        let timeLabel = UtkaChrome.label("Время", size: 12, color: UtkaChrome.dim)
+        timeLabel.sizeToFit()
+        let buttonH: CGFloat = 28
+        let height = calSize.height + pad * 3 + timeLabel.frame.height + timePicker.frame.height + buttonH
+
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        var y = height - pad - calSize.height
+        calendarPicker.frame = NSRect(x: (width - calSize.width) / 2, y: y, width: calSize.width, height: calSize.height)
+        root.addSubview(calendarPicker)
+
+        y -= pad + timeLabel.frame.height
+        timeLabel.frame = NSRect(x: pad, y: y + 2, width: 60, height: timeLabel.frame.height)
+        root.addSubview(timeLabel)
+        timePicker.frame = NSRect(x: pad + 64, y: y - 2, width: timePicker.frame.width, height: timePicker.frame.height)
+        root.addSubview(timePicker)
+
+        y = pad
         let setButton = NSButton(title: "Поставить", target: self, action: #selector(setTapped))
         setButton.bezelStyle = .rounded
-        setButton.frame = NSRect(x: 10, y: 8, width: 94, height: 28)
+        setButton.frame = NSRect(x: pad, y: y, width: 94, height: buttonH)
         root.addSubview(setButton)
         if initial != nil {
             let clearButton = NSButton(title: "Снять", target: self, action: #selector(clearTapped))
             clearButton.bezelStyle = .rounded
-            clearButton.frame = NSRect(x: 112, y: 8, width: 94, height: 28)
+            clearButton.frame = NSRect(x: pad + 100, y: y, width: 94, height: buttonH)
             root.addSubview(clearButton)
         }
         let controller = NSViewController()
@@ -49,8 +82,19 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
         popover.show(relativeTo: view.bounds, of: view, preferredEdge: .maxY)
     }
 
+    /// День берём с календаря, час и минуту — с поля времени.
+    private var combinedDate: Date {
+        let time = Calendar.current.dateComponents([.hour, .minute], from: timePicker.dateValue)
+        return Calendar.current.date(
+            bySettingHour: time.hour ?? 0,
+            minute: time.minute ?? 0,
+            second: 0,
+            of: calendarPicker.dateValue
+        ) ?? calendarPicker.dateValue
+    }
+
     @objc private func setTapped() {
-        onPick?(picker.dateValue)
+        onPick?(combinedDate)
         popover.performClose(nil)
     }
 
