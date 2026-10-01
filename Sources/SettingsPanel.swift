@@ -635,6 +635,7 @@ final class SettingsPanel: NSObject {
         canInstall = false
         updateButton.isEnabled = false
         restoreButton.isEnabled = false
+        updateLine.textColor = UtkaChrome.dim
         updateLine.stringValue = "Проверяю общий main…"
         applyPageVisibility()
         body.needsLayout = true
@@ -646,7 +647,8 @@ final class SettingsPanel: NSObject {
                 self.updateButton.isEnabled = true
                 self.restoreButton.isEnabled = true
                 self.canInstall = report.canInstall
-                self.updateLine.stringValue = report.text
+                self.updateLine.stringValue = report.isUpToDate ? "✓ \(report.text)" : report.text
+                self.updateLine.textColor = report.isUpToDate ? .systemGreen : UtkaChrome.dim
                 self.applyPageVisibility()
                 self.body.needsLayout = true
             }
