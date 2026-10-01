@@ -419,7 +419,7 @@ final class ClipboardView: NSView {
         rows = history.items.map { item in
             let row = TextRowView()
             row.show(title: oneLine(item.text), detail: "")
-            row.toolTip = item.text
+            row.toolTip = String(item.text.prefix(500))
             row.onClick = { [weak self] in self?.history.copyToPasteboard(item.text) }
             row.onDelete = { [weak self] in self?.history.remove(id: item.id) }
             document.addSubview(row)
