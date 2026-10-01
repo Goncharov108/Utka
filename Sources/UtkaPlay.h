@@ -11,3 +11,5 @@ void UtkaPlayStop(void);
 void UtkaPlayClose(void);
 /// Куда сейчас пишем. 0 — никуда.
 uint32_t UtkaPlayDevice(void);
+/// Показывает или прячет «Утка звук» в меню выходов macOS. 0 — получилось.
+int UtkaPlaySetPublished(int on);

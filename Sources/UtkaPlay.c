@@ -199,6 +199,44 @@ int UtkaPlayOpen(void) {
     return deviceForUID(UTKA_DEVICE_UID) != 0;
 }
 
+/// Плагин HAL по bundle id — чтобы толкнуть публикацию, даже если устройство спрятано.
+static AudioObjectID pluginObjectID(void) {
+    CFStringRef bundle = CFStringCreateWithCString(NULL, UTKA_PLUGIN_BUNDLE_ID, kCFStringEncodingUTF8);
+    if (bundle == NULL) return 0;
+    AudioObjectPropertyAddress address = {
+        kAudioHardwarePropertyTranslateBundleIDToPlugIn,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    AudioObjectID id = 0;
+    UInt32 size = sizeof(id);
+    OSStatus status = AudioObjectGetPropertyData(kAudioObjectSystemObject, &address, sizeof(bundle), &bundle, &size, &id);
+    CFRelease(bundle);
+    if (status != noErr) return 0;
+    return id;
+}
+
+/// Пишет флаг в кольцо и просит драйвер разослать смену списка устройств.
+int UtkaPlaySetPublished(int on) {
+    if (gRing == NULL) gRing = utkaRingMap(NULL);
+    if (gRing == NULL || gRing->magic != UTKA_RING_MAGIC || gRing->version != UTKA_RING_VERSION) return 1;
+    atomic_store_explicit(&gRing->published, on ? 1u : 0u, memory_order_release);
+    AudioObjectID plugin = pluginObjectID();
+    if (plugin == 0) return 0;
+    AudioObjectPropertyAddress address = {
+        (AudioObjectPropertySelector)UTKA_PUBLISH_SELECTOR,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    CFStringRef poke = CFSTR("1");
+    UInt32 size = sizeof(poke);
+    OSStatus status = AudioObjectSetPropertyData(plugin, &address, 0, NULL, size, &poke);
+    if (status != noErr) {
+        os_log_error(OS_LOG_DEFAULT, "utka publish poke failed %d", (int)status);
+    }
+    return 0;
+}
+
 static void stopProc(void) {
     if (gProc == NULL || gDevice == 0) {
         gProc = NULL;
