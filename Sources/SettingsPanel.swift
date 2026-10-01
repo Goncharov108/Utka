@@ -135,7 +135,8 @@ final class SettingsPanel: NSObject {
     /// Крякер — напоминатель по заметкам. Страница «Закрепы».
     private let quackSwitch = SwitchRow("Крякер")
     private let quackCaption = caption("Напоминатель по заметкам: крякает, пока не откроешь заметку или не снимешь будильник.")
-    private let quackIntervalLabel = UtkaChrome.label("Повторять кряк через", size: 13, weight: .semibold)
+    private let quackRepeat = SwitchRow("Повторять кряк")
+    private let quackThrough = UtkaChrome.label("через", size: 13, weight: .semibold)
     private let quackAge = NSTextField()
     private let quackAgeUnit = NSSegmentedControl()
     private let soundLabel = UtkaChrome.label("Звук", size: 13, weight: .semibold)
@@ -226,6 +227,7 @@ final class SettingsPanel: NSObject {
         segments(clipAgeUnit, ClipboardPrefs.Unit.allCases.map(\.title), action: #selector(clipUnitChanged))
         refreshClipboard()
         wire(quackSwitch.toggle, action: #selector(quackerToggled))
+        wire(quackRepeat.toggle, action: #selector(quackRepeatToggled))
         quackAge.font = UtkaChrome.font(13)
         quackAge.alignment = .center
         quackAge.bezelStyle = .roundedBezel
@@ -317,7 +319,7 @@ final class SettingsPanel: NSObject {
         body.addSubview(shotDisposalLabel)
         body.addSubview(shotDisposal)
         (clipViews + [clipAge, clipAgeUnit]).forEach { body.addSubview($0) }
-        ([quackSwitch.label, quackSwitch.toggle, quackCaption, quackIntervalLabel, quackAge, quackAgeUnit] as [NSView])
+        ([quackSwitch.label, quackSwitch.toggle, quackCaption, quackRepeat.label, quackRepeat.toggle, quackThrough, quackAge, quackAgeUnit] as [NSView])
             .forEach { body.addSubview($0) }
         body.addSubview(soundLabel)
         body.addSubview(soundSwitch)
@@ -447,9 +449,12 @@ final class SettingsPanel: NSObject {
         quackSwitch.toggle.isHidden = !pins
         quackCaption.isHidden = !pins
         let quackOn = pins && quackSwitch.toggle.state == .on
-        quackIntervalLabel.isHidden = !quackOn
-        quackAge.isHidden = !quackOn
-        quackAgeUnit.isHidden = !quackOn
+        quackRepeat.label.isHidden = !quackOn
+        quackRepeat.toggle.isHidden = !quackOn
+        let repeatOn = quackOn && quackRepeat.toggle.state == .on
+        quackThrough.isHidden = !repeatOn
+        quackAge.isHidden = !repeatOn
+        quackAgeUnit.isHidden = !repeatOn
         let sound = page == .sound
         let plugged = SoundPlugin.isInstalled
         soundLabel.isHidden = !sound
@@ -660,6 +665,13 @@ final class SettingsPanel: NSObject {
         body.needsLayout = true
     }
 
+    /// Повтор кряка: при выключении интервал прячется, ReminderEngine больше не тикает.
+    @objc private func quackRepeatToggled() {
+        QuackerPrefs.repeats = quackRepeat.toggle.state == .on
+        applyPageVisibility()
+        body.needsLayout = true
+    }
+
     /// Число интервала кряка. Пустое и ноль не сохраняются: в поле возвращается прежнее.
     @objc private func quackAgeCommitted() {
         let typed = Int(quackAge.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
@@ -678,6 +690,7 @@ final class SettingsPanel: NSObject {
     /// Ставит страницу «Закрепы» по сохранённым настройкам.
     private func refreshQuacker() {
         quackSwitch.toggle.state = QuackerPrefs.enabled ? .on : .off
+        quackRepeat.toggle.state = QuackerPrefs.repeats ? .on : .off
         quackAge.stringValue = String(QuackerPrefs.intervalCount)
         quackAgeUnit.selectedSegment = QuackerPrefs.intervalUnit.rawValue
     }
@@ -1339,7 +1352,7 @@ final class SettingsPanel: NSObject {
         window.backgroundColor = .clear
         chrome.apply()
         strokeOverlay.needsDisplay = true
-        let inkLabels = [titleLabel, soundLabel, searchLabel, soundReady, nativeReady, nativeTitle, versionLabel, shotCleanupLabel, shotDisposalLabel, lookLabel, glassLabel, accentLabel, strokeLabel, strokeColorLabel, quackSwitch.label, quackIntervalLabel]
+        let inkLabels = [titleLabel, soundLabel, searchLabel, soundReady, nativeReady, nativeTitle, versionLabel, shotCleanupLabel, shotDisposalLabel, lookLabel, glassLabel, accentLabel, strokeLabel, strokeColorLabel, quackSwitch.label, quackRepeat.label, quackThrough]
             + clipRows.map(\.label)
         inkLabels.forEach { $0.textColor = UtkaChrome.ink }
         let dimLabels = [soundCaption, searchCaption, translateCaption, soundNote, nativeNote, nativeState, clipSecretsCaption, quackCaption]
@@ -1442,7 +1455,11 @@ final class SettingsPanel: NSObject {
         }
         if !updateLine.stringValue.isEmpty {
             if updateIsCurrent {
-                y = layoutInstalled(updateLine, updateCheck, text: text, y: y) + 8
+                let labelWidth = text.width - 24
+                let height = fieldHeight(updateLine, width: labelWidth)
+                updateCheck.frame = NSRect(x: text.minX, y: y, width: 18, height: 18)
+                updateLine.frame = NSRect(x: text.minX + 24, y: y, width: labelWidth, height: height)
+                y += max(22, height) + 8
             } else {
                 let measured = (updateLine.stringValue as NSString).boundingRect(
                     with: NSSize(width: text.width, height: 128),
@@ -1494,19 +1511,28 @@ final class SettingsPanel: NSObject {
         return y + 8
     }
 
-    /// Крякер и интервал повторного кряка.
+    /// Крякер, повтор и интервал «через».
     private func layoutPins(text: NSRect, y: CGFloat) -> CGFloat {
         var y = layoutToggle(quackSwitch.label, quackSwitch.toggle, text: text, y: y) + 8
         let captionHeight = fieldHeight(quackCaption, width: text.width)
         quackCaption.frame = NSRect(x: text.minX, y: y, width: text.width, height: captionHeight)
         y += captionHeight + 10
         guard quackSwitch.toggle.state == .on else { return y + 8 }
-        quackIntervalLabel.frame = NSRect(x: text.minX, y: y, width: text.width, height: 18)
-        y += 26
+        y = layoutToggle(quackRepeat.label, quackRepeat.toggle, text: text, y: y)
+        guard quackRepeat.toggle.state == .on else { return y + 8 }
+        y += 8
         let row: CGFloat = 24
+        quackThrough.sizeToFit()
+        let throughW = max(40, ceil(quackThrough.fittingSize.width))
         let ageHeight = ceil(quackAge.fittingSize.height)
-        quackAge.frame = NSRect(x: text.minX, y: y + (row - ageHeight) / 2, width: 52, height: ageHeight)
-        quackAgeUnit.frame = NSRect(x: text.minX + 60, y: y, width: min(220, text.width - 60), height: row)
+        quackThrough.frame = NSRect(x: text.minX, y: y + (row - 18) / 2, width: throughW, height: 18)
+        quackAge.frame = NSRect(x: text.minX + throughW + 8, y: y + (row - ageHeight) / 2, width: 52, height: ageHeight)
+        quackAgeUnit.frame = NSRect(
+            x: text.minX + throughW + 68,
+            y: y,
+            width: min(220, text.width - throughW - 68),
+            height: row
+        )
         return y + row + 8
     }
 

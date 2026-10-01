@@ -231,13 +231,16 @@ final class AudioOutput {
             return
         }
         alarmEngines.append(engine)
-        player.scheduleFile(file, at: nil) { [weak self] in
-            DispatchQueue.main.async {
-                engine.stop()
-                self?.alarmEngines.removeAll { $0 === engine }
-            }
-        }
+        let rate = file.processingFormat.sampleRate
+        let seconds = rate > 0 ? Double(file.length) / rate : 0.4
         player.play()
+        player.scheduleFile(file, at: nil)
+        // Короткий mp3 не успевает выйти из колонок, если глушить движок
+        // в ту же секунду, когда файл «доигран» внутри плеера.
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.45) { [weak self] in
+            engine.stop()
+            self?.alarmEngines.removeAll { $0 === engine }
+        }
     }
 
     /// Выход, выбранный кнопкой на полосе.

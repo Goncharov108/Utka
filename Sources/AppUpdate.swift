@@ -36,7 +36,7 @@ enum AppUpdate {
         }
         guard isNewer(remoteNote.version, than: current) else {
             return Report(
-                text: "Сейчас \(currentLabel)\nОбновлений нет — у вас последняя версия",
+                text: "У вас самая актуальная версия.\nОбновлений нет.",
                 canInstall: false,
                 isUpToDate: true
             )
