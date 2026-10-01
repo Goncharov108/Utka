@@ -138,104 +138,6 @@ private enum PresetsTab: Int {
     case notes, files
 }
 
-/// Плавная перестановка: тащимая карточка едет за курсором, остальные догоняют слоты.
-private final class DragStrip {
-    var drag: NSView?
-    var settling: NSView?
-    var dragOrigin = NSPoint.zero
-    private var lift: CGFloat = 0
-    private var liftTarget: CGFloat = 0
-    private var shown: [ObjectIdentifier: NSPoint] = [:]
-    private var home: [ObjectIdentifier: NSPoint] = [:]
-
-    var traveling: Bool { drag != nil || settling != nil }
-
-    func begin(_ view: NSView) {
-        drag = view
-        settling = nil
-        liftTarget = 1
-    }
-
-    /// Отпускание: строка доезжает в свой слот, а не прыгает.
-    func end() {
-        if let drag {
-            shown[ObjectIdentifier(drag)] = dragOrigin
-            settling = drag
-        }
-        drag = nil
-        liftTarget = 0
-    }
-
-    func reset() {
-        drag = nil
-        settling = nil
-        lift = 0
-        liftTarget = 0
-        shown.removeAll()
-        home.removeAll()
-    }
-
-    func finish() {
-        settling = nil
-        lift = 0
-        liftTarget = 0
-    }
-
-    /// Кладёт вид в слот или оставляет за курсором.
-    func place(_ view: NSView, home homePoint: NSPoint, size: NSSize) {
-        let id = ObjectIdentifier(view)
-        home[id] = homePoint
-        let point: NSPoint
-        if view === drag {
-            point = dragOrigin
-        } else if traveling, let current = shown[id] {
-            point = current
-        } else {
-            point = homePoint
-        }
-        shown[id] = point
-        let raised = view === drag || view === settling
-        let extra = raised ? 2 * lift : 0
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        view.frame = NSRect(
-            x: point.x - extra,
-            y: point.y - extra,
-            width: size.width + extra * 2,
-            height: size.height + extra * 2
-        )
-        CATransaction.commit()
-        utkaLift(view, raised ? lift : 0)
-    }
-
-    /// Сдвигает лежащие карточки к слотам. true, пока кадр ещё едет.
-    func step() -> Bool {
-        var moving = false
-        if abs(lift - liftTarget) > 0.01 {
-            lift += (liftTarget - lift) * 0.22
-            moving = true
-        } else {
-            lift = liftTarget
-        }
-        let held = drag.map(ObjectIdentifier.init)
-        for (id, slot) in home {
-            if id == held { continue }
-            guard var current = shown[id] else { continue }
-            let dx = slot.x - current.x
-            let dy = slot.y - current.y
-            if abs(dx) > 0.4 || abs(dy) > 0.4 {
-                current.x += dx * 0.22
-                current.y += dy * 0.22
-                shown[id] = current
-                moving = true
-            } else {
-                shown[id] = slot
-            }
-        }
-        return moving
-    }
-}
-
 /// Заготовки: переключатель наверху разводит фразы и файлы по разным вкладкам,
 /// чтобы список заметок не делил место с полосой файлов.
 final class PresetsView: NSView {
@@ -244,8 +146,7 @@ final class PresetsView: NSView {
 
     private let model: PresetsModel
     private let tabControl = NSSegmentedControl()
-    private let fileScroll = NSScrollView()
-    private let fileDocument = FlippedView()
+    private let fileGrid = FileGridView(cardSize: NSSize(width: 100, height: 90))
     private let textScroll = NSScrollView()
     private let textDocument = FlippedView()
     private let emptyLabel = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
@@ -253,13 +154,11 @@ final class PresetsView: NSView {
     private let titleField = NSTextField()
     private let bodyField = NSTextField()
     private let addButton = NSButton()
-    private var cards: [FileCardView] = []
     private var rows: [TextRowView] = []
     private var expanded: Set<String> = []
     private var tab: PresetsTab = .notes
     private var removePrompt: RemovePrompt?
     private let noteStrip = DragStrip()
-    private let fileStrip = DragStrip()
     private var motionTimer: Timer?
     private var islandHeld = false
     private var rebuildPending = false
@@ -276,12 +175,9 @@ final class PresetsView: NSView {
         tabControl.selectedSegment = tab.rawValue
         tabControl.target = self
         tabControl.action = #selector(tabChanged)
-        let fileClip = FlippedClipView()
-        fileScroll.contentView = fileClip
-        fileScroll.documentView = fileDocument
-        fileScroll.hasVerticalScroller = true
-        fileScroll.drawsBackground = false
-        fileScroll.autohidesScrollers = true
+        fileGrid.onHold = { [weak self] on in self?.onDrag?(on) }
+        fileGrid.onPlace = { [weak self] id, index in self?.model.place(id: id, at: index) }
+        fileGrid.onSettled = { [weak self] in self?.rebuildIfPending() }
         let textClip = FlippedClipView()
         textScroll.contentView = textClip
         textScroll.documentView = textDocument
@@ -300,7 +196,7 @@ final class PresetsView: NSView {
         addButton.target = self
         addButton.action = #selector(addText)
         addSubview(tabControl)
-        addSubview(fileScroll)
+        addSubview(fileGrid)
         addSubview(textScroll)
         addSubview(emptyLabel)
         addSubview(errorLabel)
@@ -345,7 +241,7 @@ final class PresetsView: NSView {
 
         let showFiles = tab == .files && !focus
         let showNotes = tab == .notes && !focus
-        fileScroll.isHidden = !showFiles
+        fileGrid.isHidden = !showFiles
         textScroll.isHidden = !(showNotes || focus)
         titleField.isHidden = !showNotes
         bodyField.isHidden = !showNotes
@@ -355,7 +251,7 @@ final class PresetsView: NSView {
         if focus {
             textScroll.frame = bounds
         } else if tab == .files {
-            fileScroll.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(24, top))
+            fileGrid.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(24, top))
         } else {
             let formY: CGFloat = 4
             let formH: CGFloat = 26
@@ -371,16 +267,14 @@ final class PresetsView: NSView {
 
         let emptyIsForFiles = tab == .files
         emptyLabel.stringValue = emptyIsForFiles ? "Пусто. Перетащи сюда файл" : "Пусто. Допиши фразу ниже"
-        emptyLabel.isHidden = focus || (emptyIsForFiles ? !cards.isEmpty : !rows.isEmpty)
-        emptyLabel.frame = emptyIsForFiles ? fileScroll.frame : (showNotes ? textScroll.frame : bounds)
+        emptyLabel.isHidden = focus || (emptyIsForFiles ? !fileGrid.isEmpty : !rows.isEmpty)
+        emptyLabel.frame = emptyIsForFiles ? fileGrid.frame : (showNotes ? textScroll.frame : bounds)
 
         rows.forEach { $0.isHidden = tab != .notes || (focus && !$0.isExpanded) }
-        cards.forEach { $0.isHidden = tab != .files }
         let notesMove = rows.count > 1 && !focus
         rows.forEach { $0.canReorder = notesMove && !$0.isExpanded }
-        cards.forEach { $0.canReorder = true }
 
-        layoutContent()
+        layoutNotes()
         if focus {
             textScroll.contentView.scroll(to: .zero)
             textScroll.reflectScrolledClipView(textScroll.contentView)
@@ -389,41 +283,34 @@ final class PresetsView: NSView {
 
     /// Пока строку тащат, список не выбрасывает: иначе жест обрывается.
     private func modelChanged() {
-        guard noteStrip.drag == nil, fileStrip.drag == nil else {
-            rebuildPending = true
-            return
-        }
+        rebuild()
+    }
+
+    /// Пересборка, которую отложили на время перетаскивания.
+    private func rebuildIfPending() {
+        guard rebuildPending else { return }
+        rebuildPending = false
         rebuild()
     }
 
     private func rebuild() {
-        guard noteStrip.drag == nil, fileStrip.drag == nil else {
+        guard noteStrip.drag == nil, !fileGrid.isDragging else {
             rebuildPending = true
             return
         }
         noteStrip.reset()
-        fileStrip.reset()
-        fileDocument.subviews.forEach { $0.removeFromSuperview() }
         textDocument.subviews.forEach { $0.removeFromSuperview() }
-        let files = model.files
-        cards = files.map { preset in
+        fileGrid.setCards(model.files.map { preset in
             let card = FileCardView()
             card.show(url: model.url(for: preset), title: preset.title)
             card.consumeOnDrop = false
             card.onDrag = { [weak self] active in self?.onDrag?(active) }
             card.onRemove = { [weak self] in self?.askRemove(preset) }
-            card.canReorder = true
-            card.onReorderDrag = { [weak self, weak card] origin in
-                guard let self, let card else { return }
-                self.dragFile(card, id: preset.id, to: origin)
-            }
-            card.onReorderDrop = { [weak self] in self?.dropFile() }
             if let url = model.url(for: preset) {
                 card.onEdit = { ShotEditor.open(url: url) }
             }
-            fileDocument.addSubview(card)
-            return card
-        }
+            return (preset.id, card)
+        })
         let texts = model.texts
         rows = texts.map { preset in
             let row = TextRowView()
@@ -455,27 +342,6 @@ final class PresetsView: NSView {
         }
         errorLabel.stringValue = model.loadError
         applyLayout()
-    }
-
-    /// Карточки файлов переносятся по строкам сеткой, а не одной горизонтальной лентой.
-    private func layoutContent() {
-        layoutFiles()
-        layoutNotes()
-    }
-
-    /// Сетка файлов. Пока карточку тащат за полоски, она едет за курсором.
-    private func layoutFiles() {
-        let grid = fileGrid()
-        for (index, card) in cards.enumerated() {
-            let home = fileSlot(index, grid)
-            fileStrip.place(card, home: home, size: NSSize(width: grid.cardW, height: grid.cardH))
-        }
-        let rowsHigh = cards.isEmpty ? 0 : Int(ceil(Double(cards.count) / Double(grid.per)))
-        let height = CGFloat(rowsHigh) * (grid.cardH + grid.gap)
-        fileDocument.frame = NSRect(x: 0, y: 0, width: grid.width, height: max(height, fileScroll.contentView.bounds.height))
-        if let top = fileStrip.drag ?? fileStrip.settling {
-            fileDocument.addSubview(top, positioned: .above, relativeTo: nil)
-        }
     }
 
     /// Заметки столбиком. Раскрытая строка выше остальных, её в этот момент не тащат.
@@ -525,30 +391,8 @@ final class PresetsView: NSView {
         applyLayout()
     }
 
-    /// Тащит файл по сетке. Превью по-прежнему уносит файл наружу.
-    private func dragFile(_ card: FileCardView, id: String, to origin: NSPoint) {
-        if fileStrip.drag == nil {
-            fileStrip.begin(card)
-            holdIsland(true)
-        }
-        let grid = fileGrid()
-        fileStrip.dragOrigin = clampFile(origin, count: cards.count, grid: grid)
-        let target = fileIndex(at: fileStrip.dragOrigin, count: cards.count, grid: grid)
-        shift(rows: &cards, view: card, to: target, id: id)
-        kickMotion()
-        applyLayout()
-        card.scrollToVisible(card.bounds)
-    }
-
-    private func dropFile() {
-        fileStrip.end()
-        holdIsland(false)
-        kickMotion()
-        applyLayout()
-    }
-
-    /// Меняет видимый порядок и пишет его в модель, не пересобирая строки.
-    private func shift<T: NSView>(rows: inout [T], view: T, to target: Int, id: String) {
+    /// Меняет видимый порядок заметок и пишет его в модель, не пересобирая строки.
+    private func shift(rows: inout [TextRowView], view: TextRowView, to target: Int, id: String) {
         guard let from = rows.firstIndex(where: { $0 === view }), from != target else { return }
         rows.remove(at: from)
         rows.insert(view, at: target)
@@ -573,67 +417,14 @@ final class PresetsView: NSView {
     }
 
     private func stepMotion(_ timer: Timer) {
-        let moving = noteStrip.step() || fileStrip.step()
+        let moving = noteStrip.step()
         applyLayout()
-        guard moving else {
-            noteStrip.finish()
-            fileStrip.finish()
-            timer.invalidate()
-            motionTimer = nil
-            applyLayout()
-            guard rebuildPending else { return }
-            rebuildPending = false
-            rebuild()
-            return
-        }
-    }
-
-    private struct FileGrid {
-        var width: CGFloat
-        var per: Int
-        var cardW: CGFloat
-        var cardH: CGFloat
-        var gap: CGFloat
-    }
-
-    /// Ширина прокрутки и сколько карточек встаёт в ряд.
-    private func fileGrid() -> FileGrid {
-        let cardW: CGFloat = 100
-        let cardH: CGFloat = 90
-        let gap: CGFloat = 12
-        let width = max(fileScroll.contentView.bounds.width, fileScroll.bounds.width, 1)
-        let per = max(1, Int((width + gap) / (cardW + gap)))
-        return FileGrid(width: width, per: per, cardW: cardW, cardH: cardH, gap: gap)
-    }
-
-    /// Левый верх слота в документе, ноль сверху.
-    private func fileSlot(_ index: Int, _ grid: FileGrid) -> NSPoint {
-        let col = index % grid.per
-        let row = index / grid.per
-        return NSPoint(x: CGFloat(col) * (grid.cardW + grid.gap), y: CGFloat(row) * (grid.cardH + grid.gap))
-    }
-
-    /// Не даёт карточке уехать за край сетки.
-    private func clampFile(_ origin: NSPoint, count: Int, grid: FileGrid) -> NSPoint {
-        let columns = CGFloat(max(0, grid.per - 1))
-        let rowsHigh = Int(ceil(Double(max(count, 1)) / Double(grid.per)))
-        let rows = CGFloat(max(0, rowsHigh - 1))
-        let stepX = grid.cardW + grid.gap
-        let stepY = grid.cardH + grid.gap
-        return NSPoint(
-            x: min(max(0, origin.x), columns * stepX),
-            y: min(max(0, origin.y), rows * stepY)
-        )
-    }
-
-    /// Слот, в который попал центр тащимой карточки.
-    private func fileIndex(at origin: NSPoint, count: Int, grid: FileGrid) -> Int {
-        guard count > 0 else { return 0 }
-        let stepX = grid.cardW + grid.gap
-        let stepY = grid.cardH + grid.gap
-        let col = min(max(0, Int((origin.x / stepX).rounded())), grid.per - 1)
-        let row = max(0, Int((origin.y / stepY).rounded()))
-        return min(row * grid.per + col, count - 1)
+        guard !moving else { return }
+        noteStrip.finish()
+        timer.invalidate()
+        motionTimer = nil
+        applyLayout()
+        rebuildIfPending()
     }
 
     private func styleField(_ field: NSTextField, placeholder: String) {

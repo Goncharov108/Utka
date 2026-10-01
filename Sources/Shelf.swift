@@ -121,6 +121,16 @@ final class ShelfModel {
         onChange?()
     }
 
+    /// Ставит карточку на новое место. Список не пересобирает: сетка уже показывает новый порядок.
+    func place(id: String, at index: Int) {
+        guard let from = records.firstIndex(where: { $0.id == id }) else { return }
+        let target = min(max(0, index), records.count - 1)
+        guard from != target else { return }
+        let record = records.remove(at: from)
+        records.insert(record, at: target)
+        save()
+    }
+
     /// Имя снимка, который сейчас тащат на стол: обратный сбор его не трогает.
     func protectDesktopName(_ name: String) {
         guard isScreenshotName(name) else { return }
@@ -452,25 +462,28 @@ private enum DesktopShotReadiness {
     case ready
 }
 
-/// Полка: бросил файл — карточка, утащил наружу — карточка снимается. Вернул на полку — остаётся.
+/// Полка: бросил файл — карточка. Внутри островка карточки переставляются, за краем островка
+/// файл уходит наружу и карточка снимается. Вернул на полку — остаётся.
 final class ShelfView: NSView {
     var onDrag: ((Bool) -> Void)?
     private let model: ShelfModel
-    private let scroll = NSScrollView()
-    private let document = NSView()
+    private let grid = FileGridView(cardSize: NSSize(width: 100, height: 90))
     private let empty = UtkaChrome.label("Пока пусто", size: 13, color: UtkaChrome.dim)
-    private var cards: [FileCardView] = []
+    private var rebuildPending = false
 
     init(model: ShelfModel) {
         self.model = model
         super.init(frame: .zero)
         wantsLayer = true
-        scroll.documentView = document
-        scroll.hasHorizontalScroller = true
-        scroll.drawsBackground = false
-        scroll.autohidesScrollers = true
+        grid.onHold = { [weak self] on in self?.onDrag?(on) }
+        grid.onPlace = { [weak self] id, index in self?.model.place(id: id, at: index) }
+        grid.onSettled = { [weak self] in
+            guard let self, self.rebuildPending else { return }
+            self.rebuildPending = false
+            self.rebuild()
+        }
         empty.alignment = .center
-        addSubview(scroll)
+        addSubview(grid)
         addSubview(empty)
         registerForDraggedTypes([.fileURL])
         model.onChange = { [weak self] in self?.rebuild() }
@@ -484,14 +497,17 @@ final class ShelfView: NSView {
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
         super.resizeSubviews(withOldSize: oldSize)
-        scroll.frame = bounds
+        grid.frame = bounds
         empty.frame = bounds
-        layoutCards()
     }
 
+    /// Пока карточку тащат, список не выбрасывает: иначе жест обрывается.
     private func rebuild() {
-        document.subviews.forEach { $0.removeFromSuperview() }
-        cards = model.records.map { record in
+        guard !grid.isDragging else {
+            rebuildPending = true
+            return
+        }
+        grid.setCards(model.records.map { record in
             let card = FileCardView()
             card.show(url: model.url(for: record), title: record.name)
             let ownedShot = UtkaPaths.ownsShot(record.path)
@@ -505,21 +521,9 @@ final class ShelfView: NSView {
             if let url = model.url(for: record) {
                 card.onEdit = { ShotEditor.open(url: url) }
             }
-            document.addSubview(card)
-            return card
-        }
-        empty.isHidden = !cards.isEmpty
-        layoutCards()
-    }
-
-    private func layoutCards() {
-        var x: CGFloat = 0
-        for card in cards {
-            card.frame = NSRect(x: x, y: 8, width: 112, height: 104)
-            x += 120
-        }
-        let height = max(scroll.contentView.bounds.height, 120)
-        document.frame = NSRect(x: 0, y: 0, width: max(x, 1), height: height)
+            return (record.id, card)
+        })
+        empty.isHidden = !grid.isEmpty
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { dropOperation(for: sender) }
