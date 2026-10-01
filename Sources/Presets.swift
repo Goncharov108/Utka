@@ -575,7 +575,7 @@ final class PresetsView: NSView {
 }
 
 /// Короткое окно поверх островка: убрать запись или оставить.
-private final class RemovePrompt: NSObject {
+final class RemovePrompt: NSObject {
     var onChoose: ((Bool) -> Void)?
 
     private let window: RemoveWindow

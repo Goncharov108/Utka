@@ -54,6 +54,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.onCapture = { [weak self] in self?.captureRegion() }
         panel.onSettings = { [weak self] in self?.showSettings() }
         shelfView.onDrag = { [weak self] active in self?.hover.suspended = active }
+        clipboardView.onDrag = { [weak self] active in self?.hover.suspended = active }
         presetsView.onDrag = { [weak self] active in self?.hover.suspended = active }
         hover.extraHitRect = { [weak self] in
             guard let window = self?.panel.window, window.isVisible else { return nil }

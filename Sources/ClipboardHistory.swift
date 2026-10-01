@@ -340,12 +340,17 @@ final class ClipboardHistory {
 
 /// Список истории буфера.
 final class ClipboardView: NSView {
+    /// Держит островок открытым, пока на экране вопрос об очистке.
+    var onDrag: ((Bool) -> Void)?
+
     private let scroll = NSScrollView()
     private let document = FlippedView()
     private let empty = UtkaChrome.label("Пока пусто", size: 13, color: UtkaChrome.dim)
     private let clearButton = NSButton()
     private var rows: [TextRowView] = []
     private let history: ClipboardHistory
+    /// Вопрос «Очистить всю историю?», пока он на экране.
+    private var clearPrompt: RemovePrompt?
 
     init(history: ClipboardHistory) {
         self.history = history
@@ -411,7 +416,28 @@ final class ClipboardView: NSView {
     }
 
     @objc private func clearTapped() {
-        history.clear()
+        guard history.prefs.confirmClear else {
+            history.clear()
+            return
+        }
+        askClear()
+    }
+
+    /// Спрашивает и только потом чистит. Пока окно открыто, островок не закрывается.
+    private func askClear() {
+        guard clearPrompt == nil else { return }
+        let prompt = RemovePrompt(text: "Очистить всю историю буфера? Системный буфер не изменится.")
+        clearPrompt = prompt
+        prompt.onChoose = { [weak self] drop in
+            self?.clearPrompt = nil
+            self?.onDrag?(false)
+            guard drop else { return }
+            self?.history.clear()
+        }
+        onDrag?(true)
+        DispatchQueue.main.async { [weak self] in
+            prompt.show(over: self?.window)
+        }
     }
 
     private func rebuild() {
