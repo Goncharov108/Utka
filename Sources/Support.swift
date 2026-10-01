@@ -868,6 +868,7 @@ final class TextRowView: NSView {
     }
 
     @objc private func alarmTapped() {
+        alarmPopover.onPresenting = { [weak self] active in self?.onSelecting?(active) }
         alarmPopover.show(from: alarmButton, initial: currentDueAt) { [weak self] date in
             self?.onAlarmPicked?(date)
         }
