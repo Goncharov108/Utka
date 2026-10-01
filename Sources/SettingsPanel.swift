@@ -550,9 +550,11 @@ final class SettingsPanel: NSObject {
         shotDisposal.selectedSegment = ShotDisposal.allCases.firstIndex(of: ShelfModel.shotDisposal) ?? 0
     }
 
-    /// Включает источники звука на полосе. Поиск не трогает.
+    /// Включает источники звука на полосе и саму петлю «Утка звук». Поиск не трогает.
     @objc private func soundToggled() {
-        IslandBar.sound = soundSwitch.state == .on
+        let on = soundSwitch.state == .on
+        IslandBar.sound = on
+        AudioOutput.shared.setSoundEnabled(on)
         onIslandBar?()
     }
 

@@ -185,10 +185,13 @@ final class ReminderEngine {
         check()
     }
 
+    /// Один раз крякнуть и ничего не услышать — не напоминание. Повторяем,
+    /// пока заметку не откроют, с паузой покороче, чем раньше (45с → 30с),
+    /// чтобы точно не пропустить.
     private func startQuacking() {
         quack()
         quackTimer?.invalidate()
-        let timer = Timer(timeInterval: 45, repeats: true) { [weak self] _ in self?.quack() }
+        let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in self?.quack() }
         RunLoop.main.add(timer, forMode: .common)
         quackTimer = timer
     }
@@ -198,13 +201,13 @@ final class ReminderEngine {
         quackTimer = nil
     }
 
-    /// Два коротких звука подряд — похоже на «кря-кря». Положите в Resources/quack.caf
-    /// (или .wav) настоящую запись кряканья утки — тогда играть будет она вместо заглушки.
+    /// Играет напрямую в физические колонки Мака — не в «Утка звук» и не
+    /// туда, куда сейчас ведёт системный выход (наушники, Bluetooth и т.д.).
+    /// Будильник обязан быть услышан, а не замолчать из-за выбранного выхода.
     private func quack() {
         if let url = Bundle.main.url(forResource: "quack", withExtension: "caf")
-            ?? Bundle.main.url(forResource: "quack", withExtension: "wav"),
-           let sound = NSSound(contentsOf: url, byReference: true) {
-            sound.play()
+            ?? Bundle.main.url(forResource: "quack", withExtension: "wav") {
+            AudioOutput.shared.playThroughSpeakers(url)
             return
         }
         NSSound(named: "Pop")?.play()
