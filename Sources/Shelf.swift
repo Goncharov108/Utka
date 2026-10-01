@@ -175,9 +175,16 @@ final class ShelfModel {
         try? FileManager.default.createDirectory(at: shots, withIntermediateDirectories: true)
         retargetScreenshotCapture(to: shots)
         relocateDesktopShots()
-        knownShots = Set(imageFiles(in: shots).map(\.path))
+        // «Виденным» считаем только то, что уже есть в записях «Полки» — иначе
+        // снимок, сделанный, пока утка не работала (жест выключен или
+        // приложение вообще не запущено), навсегда помечался бы прочитанным
+        // и пропадал бы молча, ни разу не попав в список.
+        let tracked = Set(records.map(\.path))
+        knownShots = Set(imageFiles(in: shots).map(\.path)).intersection(tracked)
         watch(shots)
         watch(desktopDirectory())
+        // Догоняем пропущенное сразу, не дожидаясь следующего нового снимка.
+        scanShots()
     }
 
     private func scheduleScan() {
