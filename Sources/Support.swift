@@ -244,6 +244,7 @@ enum UtkaChrome {
 
 /// Фон окна: стекло и вуаль капли. Сам перекрашивается при смене темы.
 final class UtkaPanelChrome: NSVisualEffectView {
+    private static let radius: CGFloat = 14
     private let veil = NSView()
 
     override init(frame frameRect: NSRect) {
@@ -251,9 +252,11 @@ final class UtkaPanelChrome: NSVisualEffectView {
         blendingMode = .behindWindow
         state = .active
         wantsLayer = true
-        layer?.cornerRadius = 14
+        layer?.cornerRadius = Self.radius
         layer?.masksToBounds = true
+        maskImage = Self.roundedMask(radius: Self.radius)
         veil.wantsLayer = true
+        veil.layer?.cornerRadius = Self.radius
         addSubview(veil)
         NotificationCenter.default.addObserver(self, selector: #selector(apply), name: IslandLook.changed, object: nil)
         apply()
@@ -267,6 +270,20 @@ final class UtkaPanelChrome: NSVisualEffectView {
         if subviews.first !== veil {
             addSubview(veil, positioned: .below, relativeTo: nil)
         }
+        window?.invalidateShadow()
+    }
+
+    /// Скругление для самого стекла. Без маски размытие за окном и тень остаются квадратными — видна рамка.
+    private static func roundedMask(radius: CGFloat) -> NSImage {
+        let side = radius * 2 + 1
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+        image.resizingMode = .stretch
+        return image
     }
 
     /// Материал и плотность вуали как у капли.
@@ -603,7 +620,6 @@ final class TextRowView: NSView {
     private let deleteButton = NSButton()
     private let copyButton = NSButton()
     private let expandButton = NSButton()
-    private let grip = NSImageView()
     private let selectionButton = NSButton()
     private var reorderArmed = false
     private var reorderMoved = false
@@ -626,10 +642,6 @@ final class TextRowView: NSView {
         deleteButton.action = #selector(deleteTapped)
         styleIcon(copyButton, symbol: "doc.on.doc", tip: "Копировать всё", action: #selector(copyTapped))
         styleIcon(expandButton, symbol: "chevron.down", tip: "Раскрыть", action: #selector(toggleTapped))
-        grip.image = utkaSymbol("line.3.horizontal", point: 12, label: "Перетащить")
-        grip.imageScaling = .scaleProportionallyDown
-        grip.toolTip = "Перетащить"
-        grip.isHidden = true
         selectionButton.title = "Копировать выделенное"
         selectionButton.bezelStyle = .rounded
         selectionButton.controlSize = .small
@@ -663,7 +675,6 @@ final class TextRowView: NSView {
         addSubview(copyButton)
         addSubview(expandButton)
         addSubview(deleteButton)
-        addSubview(grip)
         addSubview(textScroll)
         addSubview(selectionButton)
         addSubview(collapseButton)
@@ -680,7 +691,6 @@ final class TextRowView: NSView {
         deleteButton.contentTintColor = UtkaChrome.dim
         copyButton.contentTintColor = UtkaChrome.dim
         expandButton.contentTintColor = isExpanded ? UtkaChrome.ink : UtkaChrome.dim
-        grip.contentTintColor = UtkaChrome.dim
         textView.textColor = UtkaChrome.ink
         textView.insertionPointColor = UtkaChrome.ink
         textView.selectedTextAttributes = [.backgroundColor: UtkaChrome.dim]
@@ -720,10 +730,8 @@ final class TextRowView: NSView {
         needsLayout = true
     }
 
-    /// Три полоски только у закреп, где строк больше одной.
+    /// Рука захвата только у закреп, где строк больше одной.
     private func refreshGrip() {
-        grip.isHidden = !canReorder
-        retintRow()
         needsLayout = true
         window?.invalidateCursorRects(for: self)
     }
@@ -741,8 +749,7 @@ final class TextRowView: NSView {
         deleteButton.frame = NSRect(x: bounds.width - 28, y: mid, width: 22, height: 18)
         expandButton.frame = NSRect(x: bounds.width - 54, y: mid, width: 22, height: 18)
         copyButton.frame = NSRect(x: bounds.width - 80, y: mid, width: 22, height: 18)
-        grip.frame = NSRect(x: bounds.width - 106, y: mid, width: 22, height: 18)
-        let textW = bounds.width - 96 - (canReorder ? 26 : 0)
+        let textW = bounds.width - 96
         if isExpanded || detailLabel.isHidden {
             titleLabel.frame = NSRect(x: 10, y: top + (head - 18) / 2, width: textW, height: 18)
         } else {
@@ -760,7 +767,7 @@ final class TextRowView: NSView {
 
     override func resetCursorRects() {
         guard canReorder, !isExpanded else { return }
-        let drag = NSRect(x: 0, y: bounds.height - TextRowView.collapsedHeight, width: grip.frame.minX, height: TextRowView.collapsedHeight)
+        let drag = NSRect(x: 0, y: bounds.height - TextRowView.collapsedHeight, width: copyButton.frame.minX - 4, height: TextRowView.collapsedHeight)
         addCursorRect(drag, cursor: .openHand)
     }
 
