@@ -148,6 +148,8 @@ final class ClipboardHistory {
     private var lastCount: Int
     private var bypass = false
     private var timer: Timer?
+    /// Таймер опрашивает буфер. Без запоминания он тикает раз в минуту только ради срока записей.
+    private var polling = false
     /// Когда последний раз снимали записи старше срока.
     private var lastSweep = Date.distantPast
     /// Срок записей проверяется не чаще этого.
@@ -160,20 +162,22 @@ final class ClipboardHistory {
         load()
     }
 
-    /// Запуск утки: снимает записи старше срока и начинает опрос буфера.
+    /// Запуск утки: снимает записи старше срока и, если запоминание включено, начинает опрос буфера.
     func start() {
         guard timer == nil else { return }
         dropExpired()
-        captureCurrentIfNeeded()
-        let timer = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in
-            self?.tick()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+        polling = prefs.remember
+        if polling { captureCurrentIfNeeded() }
+        restartTimer()
     }
 
-    /// Настройки буфера поменяли: новый срок применяется сразу.
+    /// Настройки буфера поменяли. Включённое запоминание не берёт то, что уже лежит в буфере. Новый срок применяется сразу.
     func applyPrefs() {
+        if timer != nil, prefs.remember != polling {
+            polling = prefs.remember
+            lastCount = NSPasteboard.general.changeCount
+            restartTimer()
+        }
         if sweep(now: Date()) { save() }
         onChange?()
     }
@@ -246,8 +250,22 @@ final class ClipboardHistory {
         return items.count != before
     }
 
-    /// Такт опроса: буфер — каждый раз, срок записей — не чаще раза в минуту.
+    /// Опрос буфера, пока запоминание включено. Иначе тот же таймер раз в минуту.
+    private func restartTimer() {
+        timer?.invalidate()
+        let timer = Timer(timeInterval: polling ? 0.3 : Self.sweepPeriod, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    /// Такт: буфер — каждый раз, срок записей — не чаще раза в минуту.
     private func tick() {
+        guard polling else {
+            dropExpired()
+            return
+        }
         poll()
         let now = Date()
         guard now.timeIntervalSince(lastSweep) >= Self.sweepPeriod else { return }
@@ -341,7 +359,7 @@ final class ClipboardView: NSView {
         layoutRows()
     }
 
-    /// Кнопка справа сверху, список под ней. Пустой буфер — только «Пока пусто».
+    /// Кнопка справа сверху, список под ней. Пустой буфер — только подпись вместо списка.
     private func placeChrome() {
         let showClear = !rows.isEmpty
         clearButton.isHidden = !showClear
@@ -384,6 +402,7 @@ final class ClipboardView: NSView {
             document.addSubview(row)
             return row
         }
+        empty.stringValue = history.prefs.remember ? "Пока пусто" : "Запоминание выключено в настройках"
         empty.isHidden = !rows.isEmpty
         placeChrome()
         layoutRows()
