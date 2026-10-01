@@ -30,7 +30,7 @@ enum IslandBar {
         UserDefaults.standard.set(old == 2, forKey: searchKey)
     }
 }
-private enum SettingsPage: Int {
+private enum SettingsPage: Int, CaseIterable {
     case theme, sections, sound, search, shot, translate, updates
 
     var title: String {
@@ -249,15 +249,8 @@ final class SettingsPanel: NSObject {
         body.addSubview(railLine)
         body.addSubview(nest)
         body.addSubview(chevron)
-        sideButtons = [
-            makeRow("Островок", tag: -1) { [weak self] in self?.islandClicked() },
-            makeRow(SettingsPage.sections.title, tag: SettingsPage.sections.rawValue) { [weak self] in self?.pick(.sections) },
-            makeRow(SettingsPage.sound.title, tag: SettingsPage.sound.rawValue) { [weak self] in self?.pick(.sound) },
-            makeRow(SettingsPage.search.title, tag: SettingsPage.search.rawValue) { [weak self] in self?.pick(.search) },
-            makeRow(SettingsPage.shot.title, tag: SettingsPage.shot.rawValue) { [weak self] in self?.pick(.shot) },
-            makeRow(SettingsPage.translate.title, tag: SettingsPage.translate.rawValue) { [weak self] in self?.pick(.translate) },
-            makeRow(SettingsPage.updates.title, tag: SettingsPage.updates.rawValue) { [weak self] in self?.pick(.updates) }
-        ]
+        sideButtons = [makeRow("Островок", tag: -1) { [weak self] in self?.islandClicked() }]
+            + SettingsPage.allCases.filter { $0 != .theme }.map { pageRow($0) }
         for row in sideButtons where row.rowTag >= 0 && SettingsPage(rawValue: row.rowTag)?.underIsland == true {
             row.removeFromSuperview()
             nest.addSubview(row)
@@ -346,6 +339,11 @@ final class SettingsPanel: NSObject {
         row.onClick = click
         body.addSubview(row)
         return row
+    }
+
+    /// Пункт меню, который открывает свою страницу.
+    private func pageRow(_ page: SettingsPage) -> MenuRow {
+        makeRow(page.title, tag: page.rawValue) { [weak self] in self?.pick(page) }
     }
 
     private func pick(_ next: SettingsPage) {
@@ -758,8 +756,7 @@ final class SettingsPanel: NSObject {
     private func layoutSidebar(x: CGFloat, y: CGFloat, width: CGFloat) -> CGFloat {
         let row: CGFloat = 34
         let gap: CGFloat = 2
-        guard sideButtons.count == 7 else { return y }
-        let island = sideButtons[0]
+        guard let island = sideButtons.first(where: { $0.rowTag < 0 }) else { return y }
         let children = sideButtons.filter { $0.rowTag >= 0 && SettingsPage(rawValue: $0.rowTag)?.underIsland == true }
         let rest = sideButtons.filter {
             $0.rowTag >= 0
