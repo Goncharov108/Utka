@@ -69,7 +69,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         installStatusItem(mark: mark)
         reminder.onRingingChanged = { [weak self] id in self?.ringingChanged(id) }
         reminder.start()
-        history.startPolling()
+        history.start()
         shelf.startScreenshotWatch()
         hover.start()
         resumeCaptureIfGranted()

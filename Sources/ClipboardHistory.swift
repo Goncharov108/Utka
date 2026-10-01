@@ -148,6 +148,10 @@ final class ClipboardHistory {
     private var lastCount: Int
     private var bypass = false
     private var timer: Timer?
+    /// Когда последний раз снимали записи старше срока.
+    private var lastSweep = Date.distantPast
+    /// Срок записей проверяется не чаще этого.
+    private static let sweepPeriod: TimeInterval = 60
 
     init(storeURL: URL, prefs: ClipboardPrefs = ClipboardPrefs()) {
         self.storeURL = storeURL
@@ -156,14 +160,29 @@ final class ClipboardHistory {
         load()
     }
 
-    func startPolling() {
+    /// Запуск утки: снимает записи старше срока и начинает опрос буфера.
+    func start() {
         guard timer == nil else { return }
+        dropExpired()
         captureCurrentIfNeeded()
         let timer = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in
-            self?.poll()
+            self?.tick()
         }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
+    }
+
+    /// Настройки буфера поменяли: новый срок применяется сразу.
+    func applyPrefs() {
+        if sweep(now: Date()) { save() }
+        onChange?()
+    }
+
+    /// Снимает записи старше срока, свежие оставляет.
+    func dropExpired(now: Date = Date()) {
+        guard sweep(now: now) else { return }
+        save()
+        onChange?()
     }
 
     /// Кладёт текст обратно в буфер и не записывает это в историю.
@@ -200,17 +219,39 @@ final class ClipboardHistory {
     }
 
     /// Правило истории: пустое, повтор подряд и то, что не пропустил `accepts`, не добавляются.
-    func consider(text: String?, types: [String] = []) {
+    /// `date` — время копирования; заодно уходят записи, которые к нему старше срока.
+    func consider(text: String?, types: [String] = [], at date: Date = Date()) {
         guard let text, Self.accepts(types: types, text: text, skipSecrets: prefs.skipSecrets) else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         if items.first?.text == trimmed { return }
-        items.insert(ClipItem(id: UUID().uuidString, text: trimmed, copiedAt: Date()), at: 0)
+        items.insert(ClipItem(id: UUID().uuidString, text: trimmed, copiedAt: date), at: 0)
         if items.count > 50 {
             items.removeLast(items.count - 50)
         }
+        _ = sweep(now: date)
         save()
         onChange?()
+    }
+
+    /// Убирает из списка записи старше срока и говорит, убрал ли что-то. Сохраняет вызывающий.
+    private func sweep(now: Date) -> Bool {
+        lastSweep = now
+        guard let lifetime = prefs.lifetime else { return false }
+        let before = items.count
+        items.removeAll { item in
+            guard let copiedAt = item.copiedAt else { return false }
+            return now.timeIntervalSince(copiedAt) > lifetime
+        }
+        return items.count != before
+    }
+
+    /// Такт опроса: буфер — каждый раз, срок записей — не чаще раза в минуту.
+    private func tick() {
+        poll()
+        let now = Date()
+        guard now.timeIntervalSince(lastSweep) >= Self.sweepPeriod else { return }
+        dropExpired(now: now)
     }
 
     /// Текст и пометки системного буфера — на правило истории.
