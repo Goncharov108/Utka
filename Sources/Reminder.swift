@@ -102,14 +102,23 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
         ) ?? calendarPicker.dateValue
     }
 
+    // Сначала закрыть попап и только потом применить выбор: onPick обычно
+    // меняет модель и сразу перестраивает список заметок, снимая со
+    // экрана ту самую строку, к которой попап был приколот. Если это
+    // происходит раньше закрытия, попап остаётся «висеть» без якоря и
+    // не сообщает через onPresenting, что открытие закончилось — островок
+    // потом никогда не закрывается сам.
     @objc private func setTapped() {
-        onPick?(combinedDate)
+        let picked = combinedDate
         popover.performClose(nil)
+        onPresenting?(false)
+        onPick?(picked)
     }
 
     @objc private func clearTapped() {
-        onPick?(nil)
         popover.performClose(nil)
+        onPresenting?(false)
+        onPick?(nil)
     }
 }
 
