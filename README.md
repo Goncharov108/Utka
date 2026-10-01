@@ -151,6 +151,6 @@ Utka.app/Contents/MacOS/Utka --self-check
 
 ## Звук будильника
 
-`Resources/quack.wav` — настоящая запись кряканья утки: «Domestic duck sound 01» Ганеша Мохана Т., [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Domestic_duck_sound_01.wav), лицензия [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/). Обрезан до 4,6 секунды и немного усилен по громкости, звучание не менялось.
+`Resources/quack.mp3` — кряк для напоминаний по заметкам.
 
 Лицензия MIT.

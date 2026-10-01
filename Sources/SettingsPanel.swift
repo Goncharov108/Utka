@@ -31,7 +31,7 @@ enum IslandBar {
     }
 }
 private enum SettingsPage: Int, CaseIterable {
-    case theme, sections, sound, search, shot, clipboard, translate, updates
+    case theme, sections, sound, search, shot, clipboard, pins, translate, updates
 
     var title: String {
         switch self {
@@ -41,6 +41,7 @@ private enum SettingsPage: Int, CaseIterable {
         case .search: return "Поиск"
         case .shot: return "Полка"
         case .clipboard: return "Буфер"
+        case .pins: return "Закрепы"
         case .translate: return "Перевод"
         case .updates: return "Обновления"
         }
@@ -92,9 +93,9 @@ final class SettingsPanel: NSObject {
     private var liftTarget: CGFloat = 0
     private var page: SettingsPage = .theme
     /// 0 — подменю спрятано, 1 — раскрыто. Между ними кадры таймера.
-    private var reveal: CGFloat = 1
-    private var revealFrom: CGFloat = 1
-    private var revealTarget: CGFloat = 1
+    private var reveal: CGFloat = 0
+    private var revealFrom: CGFloat = 0
+    private var revealTarget: CGFloat = 0
     private var revealBegan = Date()
     private var layingOut = false
     private let nativeTitle = UtkaChrome.label("Перевод", size: 13, weight: .semibold)
@@ -106,6 +107,8 @@ final class SettingsPanel: NSObject {
     private let updateButton = NSButton()
     private let restoreButton = NSButton()
     private let updateLine = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
+    private let updateCheck = installedMark()
+    private var updateIsCurrent = false
     private let installButton = NSButton()
     private let shotCleanupLabel = UtkaChrome.label("Удалять скрин из полки\nпосле использования", size: 13)
     private let shotCleanup = NSSwitch()
@@ -129,6 +132,12 @@ final class SettingsPanel: NSObject {
     private let clipReboot = SwitchRow("Чистить после перезагрузки Мака")
     /// Окно «Убрать / Оставить» перед «Очистить».
     private let clipConfirm = SwitchRow("Спрашивать перед очисткой")
+    /// Крякер — напоминатель по заметкам. Страница «Закрепы».
+    private let quackSwitch = SwitchRow("Крякер")
+    private let quackCaption = caption("Напоминатель по заметкам: крякает, пока не откроешь заметку или не снимешь будильник.")
+    private let quackIntervalLabel = UtkaChrome.label("Повторять кряк через", size: 13, weight: .semibold)
+    private let quackAge = NSTextField()
+    private let quackAgeUnit = NSSegmentedControl()
     private let soundLabel = UtkaChrome.label("Звук", size: 13, weight: .semibold)
     private let soundSwitch = NSSwitch()
     private let soundCaption = caption(
@@ -216,6 +225,15 @@ final class SettingsPanel: NSObject {
         clipAge.cell?.sendsActionOnEndEditing = true
         segments(clipAgeUnit, ClipboardPrefs.Unit.allCases.map(\.title), action: #selector(clipUnitChanged))
         refreshClipboard()
+        wire(quackSwitch.toggle, action: #selector(quackerToggled))
+        quackAge.font = UtkaChrome.font(13)
+        quackAge.alignment = .center
+        quackAge.bezelStyle = .roundedBezel
+        quackAge.target = self
+        quackAge.action = #selector(quackAgeCommitted)
+        quackAge.cell?.sendsActionOnEndEditing = true
+        segments(quackAgeUnit, QuackerPrefs.Unit.allCases.map(\.title), action: #selector(quackUnitChanged))
+        refreshQuacker()
         soundNote.maximumNumberOfLines = 3
         soundNote.lineBreakMode = .byWordWrapping
         soundNote.cell?.wraps = true
@@ -292,12 +310,15 @@ final class SettingsPanel: NSObject {
         body.addSubview(updateButton)
         body.addSubview(restoreButton)
         body.addSubview(updateLine)
+        body.addSubview(updateCheck)
         body.addSubview(installButton)
         body.addSubview(shotCleanupLabel)
         body.addSubview(shotCleanup)
         body.addSubview(shotDisposalLabel)
         body.addSubview(shotDisposal)
         (clipViews + [clipAge, clipAgeUnit]).forEach { body.addSubview($0) }
+        ([quackSwitch.label, quackSwitch.toggle, quackCaption, quackIntervalLabel, quackAge, quackAgeUnit] as [NSView])
+            .forEach { body.addSubview($0) }
         body.addSubview(soundLabel)
         body.addSubview(soundSwitch)
         body.addSubview(soundCaption)
@@ -345,7 +366,11 @@ final class SettingsPanel: NSObject {
         refreshShotDisposal()
         refreshIslandSwitches()
         refreshClipboard()
+        refreshQuacker()
         refreshNative()
+        reveal = 0
+        revealFrom = 0
+        revealTarget = 0
         select(.theme, animated: false)
     }
 
@@ -404,6 +429,7 @@ final class SettingsPanel: NSObject {
         updateButton.isHidden = !updates
         restoreButton.isHidden = !updates
         updateLine.isHidden = !updates
+        updateCheck.isHidden = !updates || !updateIsCurrent || updateLine.stringValue.isEmpty
         installButton.isHidden = !updates || !canInstall
         let shot = page == .shot
         shotCleanupLabel.isHidden = !shot
@@ -416,6 +442,14 @@ final class SettingsPanel: NSObject {
         let age = clipboard && clipExpire.toggle.state == .on
         clipAge.isHidden = !age
         clipAgeUnit.isHidden = !age
+        let pins = page == .pins
+        quackSwitch.label.isHidden = !pins
+        quackSwitch.toggle.isHidden = !pins
+        quackCaption.isHidden = !pins
+        let quackOn = pins && quackSwitch.toggle.state == .on
+        quackIntervalLabel.isHidden = !quackOn
+        quackAge.isHidden = !quackOn
+        quackAgeUnit.isHidden = !quackOn
         let sound = page == .sound
         let plugged = SoundPlugin.isInstalled
         soundLabel.isHidden = !sound
@@ -619,6 +653,35 @@ final class SettingsPanel: NSObject {
         clipAgeUnit.selectedSegment = clipPrefs.ageUnit.rawValue
     }
 
+    /// Тумблер крякера: пишет сразу, кнопки будильника и ReminderEngine подхватывают.
+    @objc private func quackerToggled() {
+        QuackerPrefs.enabled = quackSwitch.toggle.state == .on
+        applyPageVisibility()
+        body.needsLayout = true
+    }
+
+    /// Число интервала кряка. Пустое и ноль не сохраняются: в поле возвращается прежнее.
+    @objc private func quackAgeCommitted() {
+        let typed = Int(quackAge.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
+        if QuackerPrefs.countRange.contains(typed), typed != QuackerPrefs.intervalCount {
+            QuackerPrefs.intervalCount = typed
+        }
+        quackAge.stringValue = String(QuackerPrefs.intervalCount)
+    }
+
+    /// Единица интервала кряка.
+    @objc private func quackUnitChanged() {
+        guard let unit = QuackerPrefs.Unit(rawValue: quackAgeUnit.selectedSegment) else { return }
+        QuackerPrefs.intervalUnit = unit
+    }
+
+    /// Ставит страницу «Закрепы» по сохранённым настройкам.
+    private func refreshQuacker() {
+        quackSwitch.toggle.state = QuackerPrefs.enabled ? .on : .off
+        quackAge.stringValue = String(QuackerPrefs.intervalCount)
+        quackAgeUnit.selectedSegment = QuackerPrefs.intervalUnit.rawValue
+    }
+
     /// Включает источники звука на полосе и саму петлю «Утка звук». Поиск не трогает.
     @objc private func soundToggled() {
         let on = soundSwitch.state == .on
@@ -717,6 +780,7 @@ final class SettingsPanel: NSObject {
         guard !checking, !installing, !restoring else { return }
         checking = true
         canInstall = false
+        updateIsCurrent = false
         updateButton.isEnabled = false
         restoreButton.isEnabled = false
         updateLine.textColor = UtkaChrome.dim
@@ -731,8 +795,9 @@ final class SettingsPanel: NSObject {
                 self.updateButton.isEnabled = true
                 self.restoreButton.isEnabled = true
                 self.canInstall = report.canInstall
-                self.updateLine.stringValue = report.isUpToDate ? "✓ \(report.text)" : report.text
-                self.updateLine.textColor = report.isUpToDate ? .systemGreen : UtkaChrome.dim
+                self.updateIsCurrent = report.isUpToDate
+                self.updateLine.stringValue = report.text
+                self.updateLine.textColor = report.isUpToDate ? UtkaChrome.ink : UtkaChrome.dim
                 self.applyPageVisibility()
                 self.body.needsLayout = true
             }
@@ -830,6 +895,8 @@ final class SettingsPanel: NSObject {
             y = layoutShot(text: text, y: y)
         case .clipboard:
             y = layoutClipboard(text: text, y: y)
+        case .pins:
+            y = layoutPins(text: text, y: y)
         }
         let sideBottom = pinUpdates(x: sideX, above: above, width: sideW, pageBottom: y)
         pourPill()
@@ -1272,12 +1339,14 @@ final class SettingsPanel: NSObject {
         window.backgroundColor = .clear
         chrome.apply()
         strokeOverlay.needsDisplay = true
-        let inkLabels = [titleLabel, soundLabel, searchLabel, soundReady, nativeReady, nativeTitle, versionLabel, shotCleanupLabel, shotDisposalLabel, lookLabel, glassLabel, accentLabel, strokeLabel, strokeColorLabel]
+        let inkLabels = [titleLabel, soundLabel, searchLabel, soundReady, nativeReady, nativeTitle, versionLabel, shotCleanupLabel, shotDisposalLabel, lookLabel, glassLabel, accentLabel, strokeLabel, strokeColorLabel, quackSwitch.label, quackIntervalLabel]
             + clipRows.map(\.label)
         inkLabels.forEach { $0.textColor = UtkaChrome.ink }
-        let dimLabels = [soundCaption, searchCaption, translateCaption, soundNote, nativeNote, nativeState, updateLine, clipSecretsCaption]
+        let dimLabels = [soundCaption, searchCaption, translateCaption, soundNote, nativeNote, nativeState, clipSecretsCaption, quackCaption]
         dimLabels.forEach { $0.textColor = UtkaChrome.dim }
+        updateLine.textColor = updateIsCurrent ? UtkaChrome.ink : UtkaChrome.dim
         clipAge.textColor = UtkaChrome.ink
+        quackAge.textColor = UtkaChrome.ink
         lookMode.selectedSegment = IslandLook.mode.rawValue
         glassSlider.doubleValue = IslandLook.glass
         if !accentWell.isActive { accentWell.color = IslandLook.accent }
@@ -1372,14 +1441,18 @@ final class SettingsPanel: NSObject {
             y += 34
         }
         if !updateLine.stringValue.isEmpty {
-            let measured = (updateLine.stringValue as NSString).boundingRect(
-                with: NSSize(width: text.width, height: 128),
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: [.font: updateLine.font as Any]
-            )
-            let height = min(128, max(16, ceil(measured.height)))
-            updateLine.frame = NSRect(x: text.minX, y: y, width: text.width, height: height)
-            y += height + 8
+            if updateIsCurrent {
+                y = layoutInstalled(updateLine, updateCheck, text: text, y: y) + 8
+            } else {
+                let measured = (updateLine.stringValue as NSString).boundingRect(
+                    with: NSSize(width: text.width, height: 128),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: [.font: updateLine.font as Any]
+                )
+                let height = min(128, max(16, ceil(measured.height)))
+                updateLine.frame = NSRect(x: text.minX, y: y, width: text.width, height: height)
+                y += height + 8
+            }
         }
         if !installButton.isHidden {
             installButton.frame = NSRect(x: text.minX, y: y, width: buttonWidth(installButton), height: 28)
@@ -1419,6 +1492,22 @@ final class SettingsPanel: NSObject {
         y = layoutToggle(clipReboot.label, clipReboot.toggle, text: text, y: y + gap) + gap
         y = layoutToggle(clipConfirm.label, clipConfirm.toggle, text: text, y: y)
         return y + 8
+    }
+
+    /// Крякер и интервал повторного кряка.
+    private func layoutPins(text: NSRect, y: CGFloat) -> CGFloat {
+        var y = layoutToggle(quackSwitch.label, quackSwitch.toggle, text: text, y: y) + 8
+        let captionHeight = fieldHeight(quackCaption, width: text.width)
+        quackCaption.frame = NSRect(x: text.minX, y: y, width: text.width, height: captionHeight)
+        y += captionHeight + 10
+        guard quackSwitch.toggle.state == .on else { return y + 8 }
+        quackIntervalLabel.frame = NSRect(x: text.minX, y: y, width: text.width, height: 18)
+        y += 26
+        let row: CGFloat = 24
+        let ageHeight = ceil(quackAge.fittingSize.height)
+        quackAge.frame = NSRect(x: text.minX, y: y + (row - ageHeight) / 2, width: 52, height: ageHeight)
+        quackAgeUnit.frame = NSRect(x: text.minX + 60, y: y, width: min(220, text.width - 60), height: row)
+        return y + row + 8
     }
 
     /// Длинная подпись переносится, а не обрезается многоточием.
@@ -1465,13 +1554,13 @@ final class SettingsPanel: NSObject {
 
 /// Ряд настроек: подпись слева, тумблер справа.
 private struct SwitchRow {
-    /// Подпись тем же гротеском, что и окно.
+    /// Подпись тем же гротеском и весом, что у «Звук» / «Поиск».
     let label: NSTextField
     /// Сам тумблер.
     let toggle = NSSwitch()
 
     init(_ title: String) {
-        label = UtkaChrome.label(title, size: 13)
+        label = UtkaChrome.label(title, size: 13, weight: .semibold)
     }
 }
 

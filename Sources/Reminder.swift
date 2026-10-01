@@ -1,5 +1,83 @@
 import AppKit
 
+/// Настройки крякера — напоминателя по заметкам. Живут в UserDefaults этого Мака.
+enum QuackerPrefs {
+    /// Секунды или минуты между повторными кряками.
+    enum Unit: Int, CaseIterable {
+        case seconds, minutes
+
+        /// Подпись у сегментов на странице «Закрепы».
+        var title: String {
+            switch self {
+            case .seconds: return "секунд"
+            case .minutes: return "минут"
+            }
+        }
+
+        /// Секунд в одной единице.
+        var seconds: TimeInterval {
+            switch self {
+            case .seconds: return 1
+            case .minutes: return 60
+            }
+        }
+    }
+
+    private enum Key: String {
+        case enabled = "quackerEnabled"
+        case intervalCount = "quackerIntervalCount"
+        case intervalUnit = "quackerIntervalUnit"
+    }
+
+    /// Допустимое число единиц интервала.
+    static let countRange = 1...999
+
+    /// Крякер включён. Без ключа — да, как раньше: будильник у заметок был всегда.
+    static var enabled: Bool {
+        get {
+            guard UserDefaults.standard.object(forKey: Key.enabled.rawValue) != nil else { return true }
+            return UserDefaults.standard.bool(forKey: Key.enabled.rawValue)
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Key.enabled.rawValue)
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+    }
+
+    /// Сколько единиц ждать между кряками. Без ключа — 30. Пустое и ноль не принимаются.
+    static var intervalCount: Int {
+        get {
+            let stored = UserDefaults.standard.integer(forKey: Key.intervalCount.rawValue)
+            return countRange.contains(stored) ? stored : 30
+        }
+        set {
+            guard countRange.contains(newValue) else { return }
+            UserDefaults.standard.set(newValue, forKey: Key.intervalCount.rawValue)
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+    }
+
+    /// Единица интервала. Без ключа — секунды.
+    static var intervalUnit: Unit {
+        get {
+            (UserDefaults.standard.object(forKey: Key.intervalUnit.rawValue) as? Int)
+                .flatMap(Unit.init(rawValue:)) ?? .seconds
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: Key.intervalUnit.rawValue)
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+    }
+
+    /// Пауза между кряками в секундах.
+    static var intervalSeconds: TimeInterval {
+        TimeInterval(intervalCount) * intervalUnit.seconds
+    }
+
+    /// Крякер или интервал сменили — кнопки будильника и ReminderEngine подтягиваются.
+    static let changed = Notification.Name("QuackerPrefsChanged")
+}
+
 /// «Сегодня в 14:30» или «1 окт в 14:30» — коротко, под строку заметки.
 func alarmLabel(_ date: Date) -> String {
     let formatter = DateFormatter()
@@ -146,11 +224,31 @@ final class ReminderEngine {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(wokeUp), name: NSWorkspace.didWakeNotification, object: nil
         )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(prefsChanged), name: QuackerPrefs.changed, object: nil
+        )
         check()
     }
 
     @objc private func wokeUp() {
         check()
+    }
+
+    /// Выключили крякер или сменили интервал — сразу пересчитать.
+    @objc private func prefsChanged() {
+        if !QuackerPrefs.enabled {
+            if ringingID != nil {
+                ringingID = nil
+                onRingingChanged?(nil)
+                stopQuacking()
+            }
+            return
+        }
+        if ringingID != nil {
+            startQuacking()
+        } else {
+            check()
+        }
     }
 
     /// Заметка с ближайшим наступившим и ещё не открытым будильником, если есть.
@@ -162,6 +260,14 @@ final class ReminderEngine {
     }
 
     private func check() {
+        guard QuackerPrefs.enabled else {
+            if ringingID != nil {
+                ringingID = nil
+                onRingingChanged?(nil)
+                stopQuacking()
+            }
+            return
+        }
         let next = due(Date())
         if let next {
             guard ringingID != next.id else { return }
@@ -186,12 +292,17 @@ final class ReminderEngine {
     }
 
     /// Один раз крякнуть и ничего не услышать — не напоминание. Повторяем,
-    /// пока заметку не откроют, с паузой покороче, чем раньше (45с → 30с),
-    /// чтобы точно не пропустить.
+    /// пока заметку не откроют, с интервалом из настроек крякера.
     private func startQuacking() {
+        guard QuackerPrefs.enabled else {
+            stopQuacking()
+            return
+        }
         quack()
         quackTimer?.invalidate()
-        let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in self?.quack() }
+        let timer = Timer(timeInterval: QuackerPrefs.intervalSeconds, repeats: true) { [weak self] _ in
+            self?.quack()
+        }
         RunLoop.main.add(timer, forMode: .common)
         quackTimer = timer
     }
@@ -205,8 +316,8 @@ final class ReminderEngine {
     /// туда, куда сейчас ведёт системный выход (наушники, Bluetooth и т.д.).
     /// Будильник обязан быть услышан, а не замолчать из-за выбранного выхода.
     private func quack() {
-        if let url = Bundle.main.url(forResource: "quack", withExtension: "caf")
-            ?? Bundle.main.url(forResource: "quack", withExtension: "wav") {
+        guard QuackerPrefs.enabled else { return }
+        if let url = Bundle.main.url(forResource: "quack", withExtension: "mp3") {
             AudioOutput.shared.playThroughSpeakers(url)
             return
         }
