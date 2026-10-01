@@ -1430,7 +1430,7 @@ private final class SidebarGlyph: NSImageView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
-/// Строка раздела островка: иконка, имя, тумблер и захват для перестановки.
+/// Строка раздела островка: иконка, имя, тумблер. Строку тащат целиком, чтобы переставить.
 private final class SectionLine: NSView {
     let slot: SectionSlot
     var onDrag: ((CGFloat) -> Void)?
@@ -1439,7 +1439,6 @@ private final class SectionLine: NSView {
     var onRemove: (() -> Void)?
     private let icon = NSImageView()
     private let titleLabel: NSTextField
-    private let grip = NSImageView()
     private let toggle = NSSwitch()
     private let removeButton = NSButton()
     private var grab: CGFloat = 0
@@ -1465,20 +1464,17 @@ private final class SectionLine: NSView {
         ]
         icon.image = utkaSymbol(slot.symbol, point: 15, label: slot.listTitle)
         icon.imageScaling = .scaleProportionallyDown
-        grip.image = utkaSymbol("line.3.horizontal", point: 12, label: "Перетащить")
-        grip.imageScaling = .scaleProportionallyDown
         toggle.target = self
         toggle.action = #selector(toggled)
-        removeButton.isBordered = false
-        removeButton.image = utkaSymbol("minus.circle", point: 13, label: "Снять")
-        removeButton.imageScaling = .scaleProportionallyDown
-        removeButton.toolTip = "Снять"
+        removeButton.title = "Снять"
+        removeButton.bezelStyle = .rounded
+        removeButton.controlSize = .small
+        removeButton.font = UtkaChrome.font(11, weight: .medium)
         removeButton.target = self
         removeButton.action = #selector(removeClicked)
         removeButton.isHidden = slot.core != nil
         addSubview(icon)
         addSubview(titleLabel)
-        addSubview(grip)
         addSubview(toggle)
         addSubview(removeButton)
         applyLook()
@@ -1510,8 +1506,6 @@ private final class SectionLine: NSView {
     /// Подтягивает строку под текущую тему.
     func applyLook() {
         layer?.backgroundColor = UtkaChrome.card.cgColor
-        grip.contentTintColor = UtkaChrome.dim
-        removeButton.contentTintColor = UtkaChrome.dim
         applyShown()
     }
 
@@ -1541,17 +1535,42 @@ private final class SectionLine: NSView {
             width: switchSize.width,
             height: switchSize.height
         )
-        grip.frame = NSRect(x: toggle.frame.minX - 22, y: (bounds.height - 14) / 2, width: 16, height: 14)
         if !removeButton.isHidden {
-            removeButton.frame = NSRect(x: grip.frame.minX - 24, y: (bounds.height - 16) / 2, width: 16, height: 16)
+            let size = removeButton.fittingSize
+            let width = ceil(size.width) + 4
+            removeButton.frame = NSRect(
+                x: toggle.frame.minX - 12 - width,
+                y: (bounds.height - size.height) / 2,
+                width: width,
+                height: size.height
+            )
         }
-        let titleStop = removeButton.isHidden ? grip.frame.minX : removeButton.frame.minX
+        let titleStop = removeButton.isHidden ? toggle.frame.minX : removeButton.frame.minX
         titleLabel.frame = NSRect(x: 40, y: (bounds.height - 18) / 2, width: max(40, titleStop - 48), height: 18)
     }
 
+    /// Рука захвата — по всей строке, кроме кнопки «Снять» и тумблера.
     override func resetCursorRects() {
         let drag = NSRect(x: 0, y: 0, width: max(0, toggle.frame.minX), height: bounds.height)
-        addCursorRect(drag, cursor: .openHand)
+        guard !removeButton.isHidden else {
+            addCursorRect(drag, cursor: .openHand)
+            return
+        }
+        let button = removeButton.frame.insetBy(dx: -4, dy: -4)
+        addCursorRect(NSRect(x: 0, y: 0, width: max(0, button.minX), height: bounds.height), cursor: .openHand)
+        addCursorRect(NSRect(x: button.maxX, y: 0, width: max(0, drag.maxX - button.maxX), height: bounds.height), cursor: .openHand)
+        addCursorRect(button, cursor: .arrow)
+    }
+
+    /// Окно двигается за фон. Строку за фон не считаем, иначе вместо перестановки едет окно.
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    /// Иконка и имя не перехватывают нажатие: тащится вся строка. Тумблер и «Снять» остаются кнопками.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        let controls: [NSView] = [toggle, removeButton]
+        if controls.contains(where: { !$0.isHidden && (hit === $0 || hit.isDescendant(of: $0)) }) { return hit }
+        return self
     }
 
     override func mouseDown(with event: NSEvent) {
