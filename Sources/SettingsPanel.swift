@@ -39,7 +39,7 @@ private enum SettingsPage: Int {
         case .sections: return "Разделы"
         case .sound: return "Звук"
         case .search: return "Поиск"
-        case .shot: return "Скрин"
+        case .shot: return "Полка"
         case .translate: return "Перевод"
         case .updates: return "Обновления"
         }
@@ -55,6 +55,8 @@ private enum SettingsPage: Int {
 final class SettingsPanel: NSObject {
     /// Сообщает полке, снимать ли свой снимок после переноса.
     var onDeleteShotAfterUse: ((Bool) -> Void)?
+    /// Что делать с файлом снимка: оставить, в корзину или навсегда.
+    var onShotDisposal: ((ShotDisposal) -> Void)?
     /// Меняет верхнюю полосу островка.
     var onIslandBar: (() -> Void)?
 
@@ -102,14 +104,14 @@ final class SettingsPanel: NSObject {
     private let restoreButton = NSButton()
     private let updateLine = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
     private let installButton = NSButton()
-    private let shotCleanupLabel = UtkaChrome.label("Удалять скрин из полки после использования", size: 13)
+    private let shotCleanupLabel = UtkaChrome.label("Удалять скрин из полки\nпосле использования", size: 13)
     private let shotCleanup = NSSwitch()
+    private let shotDisposalLabel = UtkaChrome.label("Удалять скрин из полки", size: 13)
+    private let shotDisposal = NSSegmentedControl()
     private let soundLabel = UtkaChrome.label("Звук", size: 13, weight: .semibold)
     private let soundSwitch = NSSwitch()
-    private let soundCaption = UtkaChrome.label(
-        "Плагин «Утка звук» нужен, чтобы одним кликом перенести звук между мониторами и наушниками; на одном мониторе он не нужен.",
-        size: 12,
-        color: UtkaChrome.dim
+    private let soundCaption = caption(
+        "Плагин «Утка звук» даёт менять громкость на мониторе и в наушниках, подключённых к монитору. Без него macOS громкость там не регулирует. Переключать выходы можно и без плагина."
     )
     private let soundInstall = NSButton()
     private let soundNote = UtkaChrome.label("", size: 12, color: UtkaChrome.dim)
@@ -117,6 +119,9 @@ final class SettingsPanel: NSObject {
     private let soundCheck = installedMark()
     private let searchLabel = UtkaChrome.label("Поиск", size: 13, weight: .semibold)
     private let searchSwitch = NSSwitch()
+    private let searchCaption = caption(
+        "Поле поиска на полосе островка. Находит программы, файлы и папки, считает примеры (12*7), переводит единицы (5 км в м) и показывает слово из словаря Мака. Стрелки выбирают строку, Return открывает её, а готовый ответ копирует. Внизу всегда есть поиск в интернете."
+    )
     private let lookLabel = UtkaChrome.label("Режим", size: 13, weight: .semibold)
     private let lookMode = NSSegmentedControl()
     private let glassLabel = UtkaChrome.label("Стекло", size: 13, weight: .semibold)
@@ -132,6 +137,9 @@ final class SettingsPanel: NSObject {
     /// Обводка по краю окна, если она включена.
     private let strokeOverlay = SettingsStroke()
     private let nativeReady = UtkaChrome.label("Языковой пакет установлен", size: 13)
+    private let translateCaption = caption(
+        "Раздел «Переводчик» на островке: слева английский, справа русский. Пишешь в любое окно — через полсекунды перевод появляется в соседнем. Языковой пакет скачивается один раз и дальше переводит прямо на Маке, без интернета: текст никуда не уходит."
+    )
     private let nativeCheck = installedMark()
     private var canInstall = false
     private var checking = false
@@ -172,15 +180,20 @@ final class SettingsPanel: NSObject {
         mount(updateButton, title: "Проверить обновления", action: #selector(checkUpdates))
         mount(restoreButton, title: "Вернуть предыдущую", action: #selector(restorePrevious))
         mount(installButton, title: "Установить", action: #selector(installUpdate))
-        shotCleanupLabel.maximumNumberOfLines = 2
-        shotCleanupLabel.lineBreakMode = .byWordWrapping
-        shotCleanupLabel.cell?.wraps = true
+        allowWrap(shotCleanupLabel)
         shotCleanup.target = self
         shotCleanup.action = #selector(shotCleanupToggled)
         shotCleanup.state = ShelfModel.deleteShotAfterUse ? .on : .off
-        soundCaption.maximumNumberOfLines = 4
-        soundCaption.lineBreakMode = .byWordWrapping
-        soundCaption.cell?.wraps = true
+        shotDisposal.segmentCount = ShotDisposal.allCases.count
+        for (index, option) in ShotDisposal.allCases.enumerated() {
+            shotDisposal.setLabel(option.title, forSegment: index)
+        }
+        shotDisposal.trackingMode = .selectOne
+        shotDisposal.segmentDistribution = .fillEqually
+        shotDisposal.font = UtkaChrome.font(12, weight: .medium)
+        shotDisposal.target = self
+        shotDisposal.action = #selector(shotDisposalChanged)
+        refreshShotDisposal()
         soundNote.maximumNumberOfLines = 3
         soundNote.lineBreakMode = .byWordWrapping
         soundNote.cell?.wraps = true
@@ -275,6 +288,8 @@ final class SettingsPanel: NSObject {
         body.addSubview(installButton)
         body.addSubview(shotCleanupLabel)
         body.addSubview(shotCleanup)
+        body.addSubview(shotDisposalLabel)
+        body.addSubview(shotDisposal)
         body.addSubview(soundLabel)
         body.addSubview(soundSwitch)
         body.addSubview(soundCaption)
@@ -284,6 +299,8 @@ final class SettingsPanel: NSObject {
         body.addSubview(soundCheck)
         body.addSubview(searchLabel)
         body.addSubview(searchSwitch)
+        body.addSubview(searchCaption)
+        body.addSubview(translateCaption)
         body.addSubview(lookLabel)
         body.addSubview(lookMode)
         body.addSubview(glassLabel)
@@ -317,6 +334,7 @@ final class SettingsPanel: NSObject {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(body)
         shotCleanup.state = ShelfModel.deleteShotAfterUse ? .on : .off
+        refreshShotDisposal()
         refreshIslandSwitches()
         refreshNative()
         select(.theme, animated: false)
@@ -360,6 +378,7 @@ final class SettingsPanel: NSObject {
     private func applyPageVisibility() {
         let translate = page == .translate
         let pack = NativeTranslate.isInstalled
+        translateCaption.isHidden = !translate
         nativeReady.isHidden = !translate || !pack
         nativeCheck.isHidden = !translate || !pack
         nativeTitle.isHidden = !translate || pack
@@ -375,6 +394,9 @@ final class SettingsPanel: NSObject {
         let shot = page == .shot
         shotCleanupLabel.isHidden = !shot
         shotCleanup.isHidden = !shot
+        let disposal = shot && shotCleanup.state == .on
+        shotDisposalLabel.isHidden = !disposal
+        shotDisposal.isHidden = !disposal
         let sound = page == .sound
         let plugged = SoundPlugin.isInstalled
         soundLabel.isHidden = !sound
@@ -387,6 +409,7 @@ final class SettingsPanel: NSObject {
         let search = page == .search
         searchLabel.isHidden = !search
         searchSwitch.isHidden = !search
+        searchCaption.isHidden = !search
         let sections = page == .sections
         let libraryOpen = sections && showingLibrary
         sectionLines.forEach { $0.isHidden = !sections || showingLibrary }
@@ -511,6 +534,20 @@ final class SettingsPanel: NSObject {
     /// Запоминает, снимать ли свой снимок с полки после переноса.
     @objc private func shotCleanupToggled() {
         onDeleteShotAfterUse?(shotCleanup.state == .on)
+        applyPageVisibility()
+        body.needsLayout = true
+    }
+
+    /// В корзину или стереть навсегда.
+    @objc private func shotDisposalChanged() {
+        let options = ShotDisposal.allCases
+        guard options.indices.contains(shotDisposal.selectedSegment) else { return }
+        onShotDisposal?(options[shotDisposal.selectedSegment])
+    }
+
+    /// Ставит сегмент по сохранённому выбору.
+    private func refreshShotDisposal() {
+        shotDisposal.selectedSegment = ShotDisposal.allCases.firstIndex(of: ShelfModel.shotDisposal) ?? 0
     }
 
     /// Включает источники звука на полосе. Поиск не трогает.
@@ -698,7 +735,7 @@ final class SettingsPanel: NSObject {
         case .sound:
             y = layoutSound(text: text, y: y)
         case .search:
-            y = layoutToggle(searchLabel, searchSwitch, text: text, y: y) + 8
+            y = layoutSearch(text: text, y: y)
         case .translate:
             y = layoutTranslate(text: text, y: y)
         case .updates:
@@ -1016,10 +1053,35 @@ final class SettingsPanel: NSObject {
         return y + 40
     }
 
+    /// Тумблер поиска и под ним, что поиск умеет.
+    private func layoutSearch(text: NSRect, y: CGFloat) -> CGFloat {
+        let y = layoutToggle(searchLabel, searchSwitch, text: text, y: y) + 8
+        let height = fieldHeight(searchCaption, width: text.width)
+        searchCaption.frame = NSRect(x: text.minX, y: y, width: text.width, height: height)
+        return y + height + 8
+    }
+
+    /// Приглушённая подпись под пунктом настроек. Переносится на сколько угодно строк.
+    private static func caption(_ text: String) -> NSTextField {
+        let field = UtkaChrome.label(text, size: 12, color: UtkaChrome.dim)
+        field.maximumNumberOfLines = 0
+        field.lineBreakMode = .byWordWrapping
+        field.cell?.wraps = true
+        return field
+    }
+
+    /// Высота подписи так, как её переносит само поле. Голый текст меряется короче, и последняя строка срезается.
+    private func fieldHeight(_ field: NSTextField, width: CGFloat) -> CGFloat {
+        field.preferredMaxLayoutWidth = width
+        let bounds = NSRect(x: 0, y: 0, width: width, height: 10_000)
+        let size = field.cell?.cellSize(forBounds: bounds) ?? .zero
+        return max(16, ceil(size.height))
+    }
+
     /// Звук на полосе и плагин.
     private func layoutSound(text: NSRect, y: CGFloat) -> CGFloat {
         var y = layoutToggle(soundLabel, soundSwitch, text: text, y: y) + 8
-        let captionHeight = measuredHeight(soundCaption.stringValue, width: text.width, font: soundCaption.font, limit: 72)
+        let captionHeight = fieldHeight(soundCaption, width: text.width)
         soundCaption.frame = NSRect(x: text.minX, y: y, width: text.width, height: captionHeight)
         y += captionHeight + 10
         if SoundPlugin.isInstalled {
@@ -1123,9 +1185,9 @@ final class SettingsPanel: NSObject {
         window.backgroundColor = .clear
         chrome.apply()
         strokeOverlay.needsDisplay = true
-        let inkLabels = [titleLabel, soundLabel, searchLabel, soundReady, nativeReady, nativeTitle, versionLabel, shotCleanupLabel, lookLabel, glassLabel, accentLabel, strokeLabel, strokeColorLabel]
+        let inkLabels = [titleLabel, soundLabel, searchLabel, soundReady, nativeReady, nativeTitle, versionLabel, shotCleanupLabel, shotDisposalLabel, lookLabel, glassLabel, accentLabel, strokeLabel, strokeColorLabel]
         inkLabels.forEach { $0.textColor = UtkaChrome.ink }
-        let dimLabels = [soundCaption, soundNote, nativeNote, nativeState, updateLine]
+        let dimLabels = [soundCaption, searchCaption, translateCaption, soundNote, nativeNote, nativeState, updateLine]
         dimLabels.forEach { $0.textColor = UtkaChrome.dim }
         lookMode.selectedSegment = IslandLook.mode.rawValue
         glassSlider.doubleValue = IslandLook.glass
@@ -1176,8 +1238,15 @@ final class SettingsPanel: NSObject {
         return min(limit, max(16, ceil(measured.height)))
     }
 
-    /// Блок своего движка перевода.
+    /// Как работает перевод, под ним — пакет: установлен или кнопка скачать.
     private func layoutTranslate(text: NSRect, y: CGFloat) -> CGFloat {
+        let height = fieldHeight(translateCaption, width: text.width)
+        translateCaption.frame = NSRect(x: text.minX, y: y, width: text.width, height: height)
+        return layoutTranslatePack(text: text, y: y + height + 14)
+    }
+
+    /// Блок своего движка перевода.
+    private func layoutTranslatePack(text: NSRect, y: CGFloat) -> CGFloat {
         var y = y
         if NativeTranslate.isInstalled {
             return layoutInstalled(nativeReady, nativeCheck, text: text, y: y)
@@ -1230,26 +1299,47 @@ final class SettingsPanel: NSObject {
         return y
     }
 
-    /// Подпись слева, боковой тумблер справа.
+    /// Тумблер про карточку. Выбор, куда девать файл, — только когда карточка уходит.
     private func layoutShot(text: NSRect, y: CGFloat) -> CGFloat {
-        let switchSize = shotCleanup.fittingSize
+        var y = layoutWrappedToggle(shotCleanupLabel, shotCleanup, text: text, y: y)
+        guard shotCleanup.state == .on else { return y + 8 }
+        y += 18
+        shotDisposalLabel.frame = NSRect(x: text.minX, y: y, width: text.width, height: 18)
+        y += 26
+        shotDisposal.frame = NSRect(x: text.minX, y: y, width: min(280, text.width), height: 24)
+        return y + 32
+    }
+
+    /// Длинная подпись переносится, а не обрезается многоточием.
+    private func layoutWrappedToggle(_ label: NSTextField, _ toggle: NSSwitch, text: NSRect, y: CGFloat) -> CGFloat {
+        let switchSize = toggle.fittingSize
         let gap: CGFloat = 12
         let labelWidth = max(80, text.width - switchSize.width - gap)
-        let measured = (shotCleanupLabel.stringValue as NSString).boundingRect(
-            with: NSSize(width: labelWidth, height: 44),
+        label.preferredMaxLayoutWidth = labelWidth
+        let measured = (label.stringValue as NSString).boundingRect(
+            with: NSSize(width: labelWidth, height: 48),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: shotCleanupLabel.font as Any]
+            attributes: [.font: label.font as Any]
         )
         let labelHeight = max(18, ceil(measured.height))
         let row = max(labelHeight, switchSize.height)
-        shotCleanupLabel.frame = NSRect(x: text.minX, y: y + (row - labelHeight) / 2, width: labelWidth, height: labelHeight)
-        shotCleanup.frame = NSRect(
+        label.frame = NSRect(x: text.minX, y: y + (row - labelHeight) / 2, width: labelWidth, height: labelHeight)
+        toggle.frame = NSRect(
             x: text.maxX - switchSize.width,
             y: y + (row - switchSize.height) / 2,
             width: switchSize.width,
             height: switchSize.height
         )
         return y + row
+    }
+
+    /// Поле-подпись по умолчанию в одну строку. Здесь нужно две.
+    private func allowWrap(_ label: NSTextField) {
+        label.maximumNumberOfLines = 2
+        label.lineBreakMode = .byWordWrapping
+        label.cell?.wraps = true
+        label.cell?.usesSingleLineMode = false
+        label.cell?.isScrollable = false
     }
 
     /// Держит верх окна на месте. Высота ставится кадром, без системного аниматора.
@@ -1377,7 +1467,7 @@ private final class SidebarGlyph: NSImageView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
-/// Строка раздела островка: иконка, имя, тумблер и захват для перестановки.
+/// Строка раздела островка: иконка, имя, тумблер. Строку тащат целиком, чтобы переставить.
 private final class SectionLine: NSView {
     let slot: SectionSlot
     var onDrag: ((CGFloat) -> Void)?
@@ -1386,7 +1476,6 @@ private final class SectionLine: NSView {
     var onRemove: (() -> Void)?
     private let icon = NSImageView()
     private let titleLabel: NSTextField
-    private let grip = NSImageView()
     private let toggle = NSSwitch()
     private let removeButton = NSButton()
     private var grab: CGFloat = 0
@@ -1412,20 +1501,17 @@ private final class SectionLine: NSView {
         ]
         icon.image = utkaSymbol(slot.symbol, point: 15, label: slot.listTitle)
         icon.imageScaling = .scaleProportionallyDown
-        grip.image = utkaSymbol("line.3.horizontal", point: 12, label: "Перетащить")
-        grip.imageScaling = .scaleProportionallyDown
         toggle.target = self
         toggle.action = #selector(toggled)
-        removeButton.isBordered = false
-        removeButton.image = utkaSymbol("minus.circle", point: 13, label: "Снять")
-        removeButton.imageScaling = .scaleProportionallyDown
-        removeButton.toolTip = "Снять"
+        removeButton.title = "Снять"
+        removeButton.bezelStyle = .rounded
+        removeButton.controlSize = .small
+        removeButton.font = UtkaChrome.font(11, weight: .medium)
         removeButton.target = self
         removeButton.action = #selector(removeClicked)
         removeButton.isHidden = slot.core != nil
         addSubview(icon)
         addSubview(titleLabel)
-        addSubview(grip)
         addSubview(toggle)
         addSubview(removeButton)
         applyLook()
@@ -1457,8 +1543,6 @@ private final class SectionLine: NSView {
     /// Подтягивает строку под текущую тему.
     func applyLook() {
         layer?.backgroundColor = UtkaChrome.card.cgColor
-        grip.contentTintColor = UtkaChrome.dim
-        removeButton.contentTintColor = UtkaChrome.dim
         applyShown()
     }
 
@@ -1488,17 +1572,42 @@ private final class SectionLine: NSView {
             width: switchSize.width,
             height: switchSize.height
         )
-        grip.frame = NSRect(x: toggle.frame.minX - 22, y: (bounds.height - 14) / 2, width: 16, height: 14)
         if !removeButton.isHidden {
-            removeButton.frame = NSRect(x: grip.frame.minX - 24, y: (bounds.height - 16) / 2, width: 16, height: 16)
+            let size = removeButton.fittingSize
+            let width = ceil(size.width) + 4
+            removeButton.frame = NSRect(
+                x: toggle.frame.minX - 12 - width,
+                y: (bounds.height - size.height) / 2,
+                width: width,
+                height: size.height
+            )
         }
-        let titleStop = removeButton.isHidden ? grip.frame.minX : removeButton.frame.minX
+        let titleStop = removeButton.isHidden ? toggle.frame.minX : removeButton.frame.minX
         titleLabel.frame = NSRect(x: 40, y: (bounds.height - 18) / 2, width: max(40, titleStop - 48), height: 18)
     }
 
+    /// Рука захвата — по всей строке, кроме кнопки «Снять» и тумблера.
     override func resetCursorRects() {
         let drag = NSRect(x: 0, y: 0, width: max(0, toggle.frame.minX), height: bounds.height)
-        addCursorRect(drag, cursor: .openHand)
+        guard !removeButton.isHidden else {
+            addCursorRect(drag, cursor: .openHand)
+            return
+        }
+        let button = removeButton.frame.insetBy(dx: -4, dy: -4)
+        addCursorRect(NSRect(x: 0, y: 0, width: max(0, button.minX), height: bounds.height), cursor: .openHand)
+        addCursorRect(NSRect(x: button.maxX, y: 0, width: max(0, drag.maxX - button.maxX), height: bounds.height), cursor: .openHand)
+        addCursorRect(button, cursor: .arrow)
+    }
+
+    /// Окно двигается за фон. Строку за фон не считаем, иначе вместо перестановки едет окно.
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    /// Иконка и имя не перехватывают нажатие: тащится вся строка. Тумблер и «Снять» остаются кнопками.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        let controls: [NSView] = [toggle, removeButton]
+        if controls.contains(where: { !$0.isHidden && (hit === $0 || hit.isDescendant(of: $0)) }) { return hit }
+        return self
     }
 
     override func mouseDown(with event: NSEvent) {

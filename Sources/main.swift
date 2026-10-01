@@ -22,6 +22,9 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settings.onDeleteShotAfterUse = { [weak shelf] on in
             shelf?.setDeleteShotAfterUse(on)
         }
+        settings.onShotDisposal = { [weak shelf] disposal in
+            shelf?.setShotDisposal(disposal)
+        }
         ShotEditor.shelf = shelf
         presets = PresetsModel(storeURL: support.appendingPathComponent("presets.json"))
 
