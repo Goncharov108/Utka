@@ -110,12 +110,14 @@ func alarmLabel(_ date: Date) -> String {
 ///
 /// Календарь и часы в одном узком виджете (.clockAndCalendar с обоими
 /// элементами) не помещались — пропадала шапка с месяцем и подсветка
-/// сегодняшнего дня. Разнёс на два отдельных пикера: полноразмерный
-/// календарь сверху и числовое поле времени со стрелками снизу.
+/// сегодняшнего дня. Снизу одна строка: часы, минуты и плюс.
 final class AlarmPopover: NSObject, NSPopoverDelegate {
     private let popover = NSPopover()
     private let calendarPicker = NSDatePicker()
-    private let timePicker = NSDatePicker()
+    private let hourField = NSTextField()
+    private let minuteField = NSTextField()
+    private var fallbackHour = 0
+    private var fallbackMinute = 0
     private var onPick: ((Date?) -> Void)?
     /// true, пока попап открыт. Курсор на поле времени часто уходит ниже
     /// границ островка, и жест наведения принял бы это за уход мыши —
@@ -128,63 +130,27 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
         let initialDate = initial ?? Date().addingTimeInterval(600)
         let canClear = initial != nil
 
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: initialDate)
+        fallbackHour = parts.hour ?? 0
+        fallbackMinute = parts.minute ?? 0
         prepareCalendar(initialDate)
-        prepareTime(initialDate)
+        styleClock(hourField, fallbackHour)
+        styleClock(minuteField, fallbackMinute)
 
-        let pad: CGFloat = 14
-        let gap: CGFloat = 14
-        let buttonH: CGFloat = 28
-        let calFit = calendarPicker.fittingSize
-        let timeFit = timePicker.fittingSize
-        // Ширина по календарю: он занимает всю полосу, без «коробки в коробке».
-        let contentW = max(calFit.width, 280)
+        let pad: CGFloat = 12
+        let gap: CGFloat = 12
+        let rowH: CGFloat = 26
+        // Сетка дней не растягивается: строка времени ровно по её ширине.
+        let calSize = calendarPicker.fittingSize
+        let contentW = ceil(calSize.width)
         let width = contentW + pad * 2
-
-        let timeLabel = UtkaChrome.label("Время", size: 13, weight: .medium, color: UtkaChrome.dim)
-        timeLabel.sizeToFit()
-        let timeRowH = max(timeLabel.fittingSize.height, timeFit.height, 24)
-
-        let buttonsH = buttonH
-        let height = pad + calFit.height + gap + timeRowH + gap + buttonsH + pad
+        let height = pad + calSize.height + gap + rowH + pad
 
         let root = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        var y = height - pad - calFit.height
-
-        calendarPicker.frame = NSRect(x: pad, y: y, width: contentW, height: calFit.height)
+        let calendarY = height - pad - calSize.height
+        calendarPicker.frame = NSRect(x: pad, y: calendarY, width: contentW, height: calSize.height)
         root.addSubview(calendarPicker)
-
-        y -= gap + timeRowH
-        let labelW = ceil(timeLabel.fittingSize.width)
-        timeLabel.frame = NSRect(
-            x: pad,
-            y: y + (timeRowH - timeLabel.fittingSize.height) / 2,
-            width: labelW,
-            height: timeLabel.fittingSize.height
-        )
-        root.addSubview(timeLabel)
-        let timeX = pad + labelW + 12
-        timePicker.frame = NSRect(
-            x: timeX,
-            y: y + (timeRowH - timeFit.height) / 2,
-            width: min(timeFit.width + 8, contentW - labelW - 12),
-            height: timeFit.height
-        )
-        root.addSubview(timePicker)
-
-        y = pad
-        let setButton = makeActionButton(title: "Поставить", action: #selector(setTapped))
-        if canClear {
-            let clearButton = makeActionButton(title: "Снять", action: #selector(clearTapped))
-            let buttonGap: CGFloat = 8
-            let buttonW = floor((contentW - buttonGap) / 2)
-            setButton.frame = NSRect(x: pad, y: y, width: buttonW, height: buttonH)
-            clearButton.frame = NSRect(x: pad + buttonW + buttonGap, y: y, width: buttonW, height: buttonH)
-            root.addSubview(setButton)
-            root.addSubview(clearButton)
-        } else {
-            setButton.frame = NSRect(x: pad, y: y, width: contentW, height: buttonH)
-            root.addSubview(setButton)
-        }
+        placeClockRow(in: root, x: pad, y: pad, width: contentW, height: rowH, canClear: canClear)
 
         let controller = NSViewController()
         controller.view = root
@@ -216,20 +182,88 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
         calendarPicker.sizeToFit()
     }
 
-    /// Поле времени без лишнего кольца фокуса.
-    private func prepareTime(_ date: Date) {
-        timePicker.datePickerStyle = .textFieldAndStepper
-        timePicker.datePickerElements = [.hourMinute]
-        timePicker.dateValue = date
-        timePicker.focusRingType = .none
-        timePicker.sizeToFit()
+    /// Две цифры без рамки и без синей подсветки системного пикера.
+    private func styleClock(_ field: NSTextField, _ value: Int) {
+        field.isEditable = true
+        field.isSelectable = true
+        field.isBordered = false
+        field.isBezeled = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = UtkaChrome.font(17, weight: .medium)
+        field.textColor = UtkaChrome.ink
+        field.alignment = .center
+        field.stringValue = String(format: "%02d", value)
     }
 
-    /// Кнопка действия тем же гротеском, что остальная утка.
-    private func makeActionButton(title: String, action: Selector) -> NSButton {
-        let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .rounded
+    /// Одна строка на ширину календаря: цифры слева, плюс в конце.
+    private func placeClockRow(in root: NSView, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, canClear: Bool) {
+        let digitW = clockDigitWidth()
+        let digitH = ceil(hourField.fittingSize.height)
+        let colon = UtkaChrome.label(":", size: 17, weight: .medium)
+        colon.sizeToFit()
+        let colonW = ceil(colon.fittingSize.width)
+        let mid = y + (height - digitH) / 2
+
+        hourField.frame = NSRect(x: x, y: mid, width: digitW, height: digitH)
+        colon.frame = NSRect(x: x + digitW, y: mid, width: colonW, height: digitH)
+        minuteField.frame = NSRect(x: x + digitW + colonW, y: mid, width: digitW, height: digitH)
+        root.addSubview(hourField)
+        root.addSubview(colon)
+        root.addSubview(minuteField)
+
+        let plus = makePlusButton()
+        plus.frame = NSRect(x: x + width - height, y: y, width: height, height: height)
+        root.addSubview(plus)
+
+        guard canClear else { return }
+        let clear = makeClearButton()
+        let clearW = ceil(clear.fittingSize.width)
+        clear.frame = NSRect(
+            x: plus.frame.minX - 8 - clearW,
+            y: y + (height - clear.fittingSize.height) / 2,
+            width: clearW,
+            height: ceil(clear.fittingSize.height)
+        )
+        root.addSubview(clear)
+    }
+
+    /// Ширина двух цифр текущим шрифтом часов.
+    private func clockDigitWidth() -> CGFloat {
+        let font = hourField.font ?? UtkaChrome.font(17, weight: .medium)
+        let measured = ("00" as NSString).size(withAttributes: [.font: font]).width
+        return ceil(measured) + 6
+    }
+
+    /// Плюс, как у новой заметки. Он и ставит будильник.
+    private func makePlusButton() -> NSButton {
+        let button = NSButton()
+        button.title = ""
+        button.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Поставить")?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
+        button.imagePosition = .imageOnly
+        button.bezelStyle = .circular
+        button.contentTintColor = UtkaChrome.ink
+        button.target = self
+        button.action = #selector(setTapped)
+        button.toolTip = "Поставить"
+        return button
+    }
+
+    /// Короткое «снять» между временем и плюсом, если будильник уже стоит.
+    private func makeClearButton() -> NSButton {
+        let button = NSButton(title: "снять", target: self, action: #selector(clearTapped))
+        button.isBordered = false
         button.font = UtkaChrome.font(13, weight: .medium)
+        button.contentTintColor = UtkaChrome.dim
+        let title = NSAttributedString(
+            string: "снять",
+            attributes: [
+                .font: UtkaChrome.font(13, weight: .medium),
+                .foregroundColor: UtkaChrome.dim
+            ]
+        )
+        button.attributedTitle = title
         return button
     }
 
@@ -237,15 +271,24 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
         onPresenting?(false)
     }
 
-    /// День берём с календаря, час и минуту — с поля времени.
-    private var combinedDate: Date {
-        let time = Calendar.current.dateComponents([.hour, .minute], from: timePicker.dateValue)
+    /// День берём с календаря, час и минуту — с двух полей. Пустое и кривое не принимаем.
+    private var combinedDate: Date? {
+        guard let hour = strictClock(hourField, max: 23), let minute = strictClock(minuteField, max: 59) else {
+            return nil
+        }
         return Calendar.current.date(
-            bySettingHour: time.hour ?? 0,
-            minute: time.minute ?? 0,
+            bySettingHour: hour,
+            minute: minute,
             second: 0,
             of: calendarPicker.dateValue
         ) ?? calendarPicker.dateValue
+    }
+
+    /// Число в диапазоне, иначе nil. Ноль для часа и минуты допустим.
+    private func strictClock(_ field: NSTextField, max: Int) -> Int? {
+        let typed = Int(field.stringValue.trimmingCharacters(in: .whitespaces))
+        guard let typed, (0...max).contains(typed) else { return nil }
+        return typed
     }
 
     // Сначала закрыть попап и только потом применить выбор: onPick обычно
@@ -255,7 +298,11 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
     // не сообщает через onPresenting, что открытие закончилось — островок
     // потом никогда не закрывается сам.
     @objc private func setTapped() {
-        let picked = combinedDate
+        guard let picked = combinedDate else {
+            styleClock(hourField, fallbackHour)
+            styleClock(minuteField, fallbackMinute)
+            return
+        }
         popover.performClose(nil)
         onPresenting?(false)
         onPick?(picked)
