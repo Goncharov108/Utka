@@ -49,7 +49,12 @@ final class AudioOutput {
         listen(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice, add: true)
         refreshFromHardware()
         guard IslandBar.sound else { return }
-        requestListenAccess()
+        if pluginPresent { requestListenAccess() }
+    }
+
+    /// Плагин «Утка звук» стоит в системной папке или его устройство уже видно.
+    private var pluginPresent: Bool {
+        SoundPlugin.isInstalled || deviceID(forUID: virtualUID) != 0
     }
 
     /// macOS считает петлю «Утка звук» микрофоном. Пока доступ не дан, системный выход не переключаем.
@@ -68,9 +73,14 @@ final class AudioOutput {
         }
     }
 
+    /// Маршрут через «Утка звук» разрешён: тумблер «Звук» включён и утка не закрывается.
+    private var routeAllowed: Bool {
+        IslandBar.sound && !didShutdown
+    }
+
     /// Если плагин загружен, системный выход становится «Утка звук», а железо только принимает поток.
     private func beginRoute() {
-        guard !routed, UtkaPlayOpen() != 0 else { return }
+        guard routeAllowed, !routed, UtkaPlayOpen() != 0 else { return }
         let found = deviceID(forUID: virtualUID)
         guard found != 0 else {
             UtkaPlayClose()
@@ -144,7 +154,7 @@ final class AudioOutput {
             return
         }
         guard started else { return }
-        requestListenAccess()
+        if pluginPresent { requestListenAccess() }
     }
 
     /// Физические колонки Мака — в обход «Утка звук», наушников, Bluetooth

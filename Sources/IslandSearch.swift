@@ -405,13 +405,12 @@ final class IslandSearch: NSObject {
             .replacingOccurrences(of: ",", with: ".")
             .replacingOccurrences(of: "×", with: "*")
             .replacingOccurrences(of: "÷", with: "/")
+            .replacingOccurrences(of: "−", with: "-")
             .replacingOccurrences(of: " ", with: "")
         guard expr.range(of: #"^[0-9.+\-*/()]+$"#, options: .regularExpression) != nil,
-              expr.contains(where: { "+-*/".contains($0) }) else { return nil }
-        let value = NSExpression(format: expr).expressionValue(with: nil, context: nil) as? NSNumber
-        guard let value, value.doubleValue.isFinite else { return nil }
-        let number = value.doubleValue
-        if number.rounded() == number { return String(Int(number)) }
+              expr.contains(where: { "+-*/".contains($0) }),
+              let number = Arithmetic.evaluate(expr) else { return nil }
+        if number.rounded() == number, abs(number) < 1e15 { return String(Int(number)) }
         return String(format: "%g", number)
     }
 
@@ -465,6 +464,71 @@ final class IslandSearch: NSObject {
         let line = (value as String).replacingOccurrences(of: "\n", with: " ")
         guard !line.isEmpty else { return nil }
         return line.count > 90 ? String(line.prefix(90)) + "…" : line
+    }
+}
+
+/// Счёт для поиска: числа, + - * /, скобки и унарный минус. Любая ошибка разбора — nil.
+private struct Arithmetic {
+    /// Пример без пробелов, по одному знаку.
+    private let chars: [Character]
+    /// Следующий непрочитанный знак.
+    private var index = 0
+    /// Вложенность скобок и минусов. Без предела длинная вставка переполнила бы стек.
+    private var depth = 0
+
+    /// Значение всего примера. Лишний хвост, деление на ноль и бесконечность — nil.
+    static func evaluate(_ text: String) -> Double? {
+        var parser = Arithmetic(chars: Array(text))
+        guard let value = parser.sum(), parser.index == parser.chars.count, value.isFinite else { return nil }
+        return value
+    }
+
+    /// Сложение и вычитание слева направо.
+    private mutating func sum() -> Double? {
+        guard var value = product() else { return nil }
+        while let sign = take("+-") {
+            guard let next = product() else { return nil }
+            value = sign == "+" ? value + next : value - next
+        }
+        return value
+    }
+
+    /// Умножение и деление слева направо. Делить на ноль нельзя.
+    private mutating func product() -> Double? {
+        guard var value = factor() else { return nil }
+        while let sign = take("*/") {
+            guard let next = factor(), sign == "*" || next != 0 else { return nil }
+            value = sign == "*" ? value * next : value / next
+        }
+        return value
+    }
+
+    /// Число, пример в скобках или минус перед ними.
+    private mutating func factor() -> Double? {
+        guard depth < 64 else { return nil }
+        depth += 1
+        defer { depth -= 1 }
+        if take("-") != nil { return factor().map { -$0 } }
+        guard take("(") != nil else { return number() }
+        guard let value = sum(), take(")") != nil else { return nil }
+        return value
+    }
+
+    /// Цифры и не больше одного разделителя дроби.
+    private mutating func number() -> Double? {
+        let start = index
+        while index < chars.count, "0123456789.".contains(chars[index]) {
+            index += 1
+        }
+        guard let value = Double(String(chars[start..<index])), value.isFinite else { return nil }
+        return value
+    }
+
+    /// Забирает следующий знак, если он из набора.
+    private mutating func take(_ signs: String) -> Character? {
+        guard index < chars.count, signs.contains(chars[index]) else { return nil }
+        index += 1
+        return chars[index - 1]
     }
 }
 

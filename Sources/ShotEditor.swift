@@ -649,10 +649,18 @@ final class ShotBarDivider: NSView {
     }
 }
 
+/// Краски тёмного редактора: окно всегда тёмное, тема островка их не меняет.
+extension UtkaChrome {
+    /// Значки, подписи и выбранный инструмент на полосе редактора.
+    static var editorInk: NSColor { .white }
+    /// Невыбранный инструмент и статус на полосе редактора.
+    static var editorDim: NSColor { NSColor.white.withAlphaComponent(0.55) }
+}
+
 /// Подпись в полосе: по центру прямоугольника, гротеск продукта.
 private func drawBarSign(_ text: String, in rect: NSRect, size: CGFloat = 14) {
     let font = UtkaChrome.font(size, weight: .medium)
-    let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UtkaChrome.ink]
+    let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UtkaChrome.editorInk]
     let box = (text as NSString).size(withAttributes: attrs)
     (text as NSString).draw(
         at: NSPoint(x: rect.midX - box.width / 2, y: rect.midY - box.height / 2),
@@ -849,7 +857,7 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
     private let window: ShotWindow
     private let canvas = ShotCanvasView()
     private let bar = NSView()
-    private let status = UtkaChrome.label("", size: 11, color: UtkaChrome.dim)
+    private let status = UtkaChrome.label("", size: 11, color: UtkaChrome.editorDim)
     private var toolButtons: [NSButton] = []
     private var undoButton: NSButton!
     private let styleBar = ShotStyleBar()
@@ -968,7 +976,7 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
         button.imagePosition = .imageOnly
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)?
             .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
-        button.contentTintColor = UtkaChrome.ink
+        button.contentTintColor = UtkaChrome.editorInk
         button.toolTip = tip
         button.target = self
         return button
@@ -1070,7 +1078,7 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
     private func showTool(_ tool: ShotTool) {
         for button in toolButtons where button.action == #selector(toolTapped(_:)) {
             let on = button.tag == tool.rawValue
-            button.contentTintColor = on ? UtkaChrome.ink : UtkaChrome.dim
+            button.contentTintColor = on ? UtkaChrome.editorInk : UtkaChrome.editorDim
         }
     }
 }

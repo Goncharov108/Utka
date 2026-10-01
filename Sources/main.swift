@@ -337,9 +337,21 @@ enum SelfCheck {
     /// Счёт и единицы отвечают сразу, без индекса Spotlight.
     private static func checkSpot() {
         let search = IslandSearch()
-        let calc = search.preview("2+2")
-        if calc.first?.title != "4" || calc.first?.detail != "Калькулятор" {
-            fail("калькулятор \(calc.map(\.title))")
+        let answers = [
+            ("2+2", "4"), ("12*7", "84"), ("(2+3)*4", "20"), ("-3+5", "2"),
+            ("10/4", "2.5"), ("1,5*2", "3"), ("2×3", "6"),
+            ("99999999999*99999999999", String(format: "%g", 99999999999.0 * 99999999999.0))
+        ]
+        for (expr, answer) in answers {
+            let first = search.preview(expr).first
+            if first?.title != answer || first?.detail != "Калькулятор" {
+                fail("калькулятор \(expr) → \(first?.title ?? "пусто")")
+            }
+        }
+        for expr in ["2+", "(", ")", "-", "+", "2+*3", "2..5+1", "1/0", "()", "2**3", "((2)"] {
+            if search.preview(expr).contains(where: { $0.detail == "Калькулятор" }) {
+                fail("калькулятор ответил на «\(expr)»")
+            }
         }
         let units = search.preview("10 км в м")
         if !units.contains(where: { $0.detail == "Перевод единиц" && $0.title.hasPrefix("10000") }) {
@@ -548,6 +560,17 @@ if let index = CommandLine.arguments.firstIndex(of: "--translate"), CommandLine.
     case .failure(let error):
         fputs(error.message + "\n", stderr)
         exit(1)
+    }
+}
+
+if let bundleID = Bundle.main.bundleIdentifier {
+    let own = ProcessInfo.processInfo.processIdentifier
+    let twin = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+        $0.processIdentifier != own && !$0.isTerminated
+    }
+    if let twin {
+        fputs("Утка уже запущена (pid \(twin.processIdentifier))\n", stderr)
+        exit(0)
     }
 }
 

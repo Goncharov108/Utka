@@ -77,7 +77,7 @@ fi
 # Предыдущая утка только на этом Маке. В репозиторий не кладётся.
 # Сначала полная копия во временную папку: пустой Utka.app предыдущую не затирает.
 PREVIOUS="$HOME/Library/Application Support/Utka/PreviousUtka.app"
-if [ -x "$LIVE/Contents/MacOS/Utka" ]; then
+if [ "${UTKA_NO_PREVIOUS:-}" != "1" ] && [ -x "$LIVE/Contents/MacOS/Utka" ]; then
   utka_step previous
   support="$HOME/Library/Application Support/Utka"
   stage="$support/PreviousUtka.staging.app"
@@ -103,6 +103,7 @@ BIN_DIR="$(mktemp -d)"
 trap 'rm -rf "$BIN_DIR"' EXIT
 BINS=()
 DRIVER_BINS=()
+MISSING=""
 for arch in arm64 x86_64; do
   play="$BIN_DIR/UtkaPlay-$arch.o"
   out="$BIN_DIR/Utka-$arch"
@@ -127,6 +128,7 @@ for arch in arm64 x86_64; do
   else
     echo "сборка $arch пропущена" >&2
     utka_step "skip $step_name"
+    MISSING="$MISSING $arch"
   fi
   if clang -bundle -O2 -target "${arch}-apple-macosx13.3" \
     -framework CoreAudio -framework CoreFoundation \
@@ -141,6 +143,10 @@ for arch in arm64 x86_64; do
 done
 if [ "${#BINS[@]}" -eq 0 ]; then
   echo "не собралось ни для одной архитектуры" >&2
+  exit 1
+fi
+if [ "${UTKA_RELEASE:-}" = "1" ] && [ -n "$MISSING" ]; then
+  echo "выпуск остановлен: не собралось$MISSING, а нужны arm64 и x86_64" >&2
   exit 1
 fi
 if [ "${#BINS[@]}" -eq 1 ]; then
@@ -211,7 +217,12 @@ EOF
   openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
     -config "$CERT_DIR/cert.cnf" -extensions ext \
     -keyout "$CERT_DIR/utka.key" -out "$CERT_DIR/utka.crt"
-  openssl pkcs12 -export -legacy \
+  # -legacy знает только OpenSSL 3, системный LibreSSL на нём падает.
+  legacy=""
+  case "$(openssl version)" in
+    "OpenSSL 3"*) legacy="-legacy" ;;
+  esac
+  openssl pkcs12 -export $legacy \
     -inkey "$CERT_DIR/utka.key" -in "$CERT_DIR/utka.crt" \
     -out "$CERT_DIR/utka.p12" -passout pass:utka
   security import "$CERT_DIR/utka.p12" -k "$HOME/Library/Keychains/login.keychain-db" \
