@@ -516,6 +516,17 @@ if let index = CommandLine.arguments.firstIndex(of: "--translate"), CommandLine.
     }
 }
 
+if let bundleID = Bundle.main.bundleIdentifier {
+    let own = ProcessInfo.processInfo.processIdentifier
+    let twin = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+        $0.processIdentifier != own && !$0.isTerminated
+    }
+    if let twin {
+        fputs("Утка уже запущена (pid \(twin.processIdentifier))\n", stderr)
+        exit(0)
+    }
+}
+
 let delegate = UtkaApp()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
