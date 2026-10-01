@@ -273,6 +273,7 @@ final class PresetsView: NSView {
     }
 
     @objc private func alarmTapped() {
+        alarmPopover.onPresenting = { [weak self] active in self?.onDrag?(active) }
         alarmPopover.show(from: alarmButton, initial: pendingAlarmDate) { [weak self] date in
             self?.pendingAlarmDate = date
             self?.updateAlarmButton()

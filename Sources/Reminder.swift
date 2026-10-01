@@ -26,6 +26,10 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
     private let calendarPicker = NSDatePicker()
     private let timePicker = NSDatePicker()
     private var onPick: ((Date?) -> Void)?
+    /// true, пока попап открыт. Курсор на поле времени часто уходит ниже
+    /// границ островка, и жест наведения принял бы это за уход мыши —
+    /// подписчик (панель заготовок) на это время держит островок открытым.
+    var onPresenting: ((Bool) -> Void)?
 
     /// view — якорь попапа. initial — текущая дата будильника, если уже стоит.
     func show(from view: NSView, initial: Date?, onPick: @escaping (Date?) -> Void) {
@@ -79,7 +83,12 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
         popover.contentViewController = controller
         popover.behavior = .transient
         popover.delegate = self
+        onPresenting?(true)
         popover.show(relativeTo: view.bounds, of: view, preferredEdge: .maxY)
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        onPresenting?(false)
     }
 
     /// День берём с календаря, час и минуту — с поля времени.
