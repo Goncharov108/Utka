@@ -162,9 +162,10 @@ final class ClipboardHistory {
         load()
     }
 
-    /// Запуск утки: снимает записи старше срока и, если запоминание включено, начинает опрос буфера.
+    /// Запуск утки: чистка после перезагрузки, записи старше срока, затем опрос буфера, если запоминание включено.
     func start() {
         guard timer == nil else { return }
+        if let boot = Self.systemBootTime() { noteBoot(boot) }
         dropExpired()
         polling = prefs.remember
         if polling { captureCurrentIfNeeded() }
@@ -187,6 +188,28 @@ final class ClipboardHistory {
         guard sweep(now: now) else { return }
         save()
         onChange?()
+    }
+
+    /// Сверяет время загрузки системы с прошлым запуском и запоминает нынешнее. После перезагрузки чистит историю, если так настроено.
+    func noteBoot(_ bootTime: Double) {
+        if prefs.clearOnReboot, Self.rebooted(saved: prefs.bootTime, current: bootTime) {
+            clear()
+        }
+        prefs.bootTime = bootTime
+    }
+
+    /// Мак перезагружался: время загрузки сменилось. Сдвиг до минуты — та же загрузка: macOS сдвигает это время, когда подводит часы.
+    static func rebooted(saved: Double?, current: Double) -> Bool {
+        guard let saved else { return false }
+        return abs(current - saved) > 60
+    }
+
+    /// Время загрузки системы из kern.boottime, секунды с 1970 года.
+    static func systemBootTime() -> Double? {
+        var boot = timeval()
+        var size = MemoryLayout<timeval>.size
+        guard sysctlbyname("kern.boottime", &boot, &size, nil, 0) == 0 else { return nil }
+        return Double(boot.tv_sec) + Double(boot.tv_usec) / 1_000_000
     }
 
     /// Кладёт текст обратно в буфер и не записывает это в историю.
