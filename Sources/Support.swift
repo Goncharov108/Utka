@@ -607,6 +607,7 @@ final class TextRowView: NSView {
     var onClick: (() -> Void)?
     var onDelete: (() -> Void)?
     var onToggle: (() -> Void)?
+    var onAlarmPicked: ((Date?) -> Void)?
     /// Захват порядка. У буфера выключено, строка остаётся прежней.
     var canReorder = false { didSet { refreshGrip() } }
     var onReorderDrag: ((CGFloat) -> Void)?
@@ -626,7 +627,12 @@ final class TextRowView: NSView {
     private let detailLabel = UtkaChrome.label("", size: 11, color: UtkaChrome.dim)
     private let deleteButton = NSButton()
     private let copyButton = NSButton()
+    private let alarmButton = NSButton()
     private let expandButton = NSButton()
+    private var hasAlarm = false
+    private var alarmRinging = false
+    private var currentDueAt: Date?
+    private let alarmPopover = AlarmPopover()
     private let selectionButton = NSButton()
     private var reorderArmed = false
     private var reorderMoved = false
@@ -648,6 +654,7 @@ final class TextRowView: NSView {
         deleteButton.target = self
         deleteButton.action = #selector(deleteTapped)
         styleIcon(copyButton, symbol: "doc.on.doc", tip: "Копировать всё", action: #selector(copyTapped))
+        styleIcon(alarmButton, symbol: "calendar", tip: "Поставить будильник", action: #selector(alarmTapped))
         styleIcon(expandButton, symbol: "chevron.down", tip: "Раскрыть", action: #selector(toggleTapped))
         selectionButton.title = "Копировать выделенное"
         selectionButton.bezelStyle = .rounded
@@ -680,6 +687,7 @@ final class TextRowView: NSView {
         addSubview(titleLabel)
         addSubview(detailLabel)
         addSubview(copyButton)
+        addSubview(alarmButton)
         addSubview(expandButton)
         addSubview(deleteButton)
         addSubview(textScroll)
@@ -701,15 +709,34 @@ final class TextRowView: NSView {
         textView.textColor = UtkaChrome.ink
         textView.insertionPointColor = UtkaChrome.ink
         textView.selectedTextAttributes = [.backgroundColor: UtkaChrome.dim]
+        updateAlarmLook()
     }
 
     required init?(coder: NSCoder) { nil }
 
-    func show(title: String, detail: String, body: String = "") {
+    /// dueAt — будильник заметки, если стоит; вместо превью текста показывается дата.
+    /// ringing — срок уже наступил и заметку ещё не открывали: подсвечивает строку.
+    func show(title: String, detail: String, body: String = "", dueAt: Date? = nil, ringing: Bool = false) {
         titleLabel.stringValue = title
-        detailLabel.stringValue = detail
-        detailLabel.isHidden = isExpanded || detail.isEmpty || detail == title
+        hasAlarm = dueAt != nil
+        alarmRinging = ringing
+        currentDueAt = dueAt
+        let alarmText = dueAt.map(alarmLabel)
+        detailLabel.stringValue = alarmText ?? detail
+        detailLabel.isHidden = isExpanded || detailLabel.stringValue.isEmpty || (alarmText == nil && detail == title)
         textView.string = body
+        updateAlarmLook()
+    }
+
+    private func updateAlarmLook() {
+        let symbol = hasAlarm ? "calendar.badge.clock" : "calendar"
+        alarmButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Будильник")?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        alarmButton.toolTip = hasAlarm ? "Изменить будильник" : "Поставить будильник"
+        alarmButton.contentTintColor = alarmRinging ? .systemRed : (hasAlarm ? UtkaChrome.ink : UtkaChrome.dim)
+        detailLabel.textColor = alarmRinging ? .systemRed : UtkaChrome.dim
+        layer?.borderWidth = alarmRinging ? 1.5 : 0
+        layer?.borderColor = alarmRinging ? NSColor.systemRed.cgColor : nil
     }
 
     private func styleIcon(_ button: NSButton, symbol: String, tip: String, action: Selector) {
@@ -756,7 +783,8 @@ final class TextRowView: NSView {
         deleteButton.frame = NSRect(x: bounds.width - 28, y: mid, width: 22, height: 18)
         expandButton.frame = NSRect(x: bounds.width - 54, y: mid, width: 22, height: 18)
         copyButton.frame = NSRect(x: bounds.width - 80, y: mid, width: 22, height: 18)
-        let textW = bounds.width - 96
+        alarmButton.frame = NSRect(x: bounds.width - 106, y: mid, width: 22, height: 18)
+        let textW = bounds.width - 122
         if isExpanded || detailLabel.isHidden {
             titleLabel.frame = NSRect(x: 10, y: top + (head - 18) / 2, width: textW, height: 18)
         } else {
@@ -781,7 +809,7 @@ final class TextRowView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
         guard canReorder, !isExpanded else { return hit }
-        let controls = [deleteButton, copyButton, expandButton]
+        let controls = [deleteButton, copyButton, expandButton, alarmButton]
         if controls.contains(where: { hit === $0 || hit.isDescendant(of: $0) }) { return hit }
         return self
     }
@@ -817,7 +845,7 @@ final class TextRowView: NSView {
         reorderArmed = false
         let point = convert(event.locationInWindow, from: nil)
         guard bounds.contains(point), point.y >= bounds.height - TextRowView.collapsedHeight else { return }
-        let controls = [deleteButton, copyButton, expandButton]
+        let controls = [deleteButton, copyButton, expandButton, alarmButton]
         guard !controls.contains(where: { !$0.isHidden && $0.frame.contains(point) }) else { return }
         flash()
         onClick?()
@@ -837,6 +865,13 @@ final class TextRowView: NSView {
 
     @objc private func toggleTapped() {
         onToggle?()
+    }
+
+    @objc private func alarmTapped() {
+        alarmPopover.onPresenting = { [weak self] active in self?.onSelecting?(active) }
+        alarmPopover.show(from: alarmButton, initial: currentDueAt) { [weak self] date in
+            self?.onAlarmPicked?(date)
+        }
     }
 
     @objc private func copySelectionTapped() {

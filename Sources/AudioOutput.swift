@@ -1,4 +1,6 @@
 import AVFoundation
+import AppKit
+import AudioToolbox
 import CoreAudio
 import Foundation
 
@@ -37,13 +39,16 @@ final class AudioOutput {
 
     private init() {}
 
-    /// Подписывается на появление устройств и смену выхода.
+    /// Подписывается на появление устройств и смену выхода. Список и уровни
+    /// громкости видны всегда, а саму петлю «Утка звук» поднимаем, только
+    /// если тумблер «Звук» в настройках включён.
     func start() {
         guard !started else { return }
         started = true
         listen(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDevices, add: true)
         listen(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice, add: true)
         refreshFromHardware()
+        guard IslandBar.sound else { return }
         if pluginPresent { requestListenAccess() }
     }
 
@@ -117,12 +122,82 @@ final class AudioOutput {
     func shutdown() {
         guard !didShutdown else { return }
         didShutdown = true
+        endRoute()
+    }
+
+    /// Выключает петлю «Утка звук» и возвращает системный выход на прежнее
+    /// устройство. В отличие от shutdown() можно звать сколько угодно раз —
+    /// именно это нужно, когда тумблер «Звук» в настройках выключают и
+    /// включают обратно, а не только при закрытии утки.
+    func endRoute() {
+        guard routed else { return }
         let restore = playID
-        let wasRouted = routed
         routed = false
         UtkaPlayClose()
-        guard wasRouted, restore != 0, restore != virtualID else { return }
-        _ = setSystemOutput(restore)
+        if restore != 0, restore != virtualID {
+            _ = setSystemOutput(restore)
+        }
+        refreshFromHardware()
+    }
+
+    /// Тумблер «Звук» из настроек: выключен — петля гасится и больше не
+    /// поднимается сама, включён — пробуем поднять её снова (если доступ
+    /// к «микрофону» уже дан; иначе дождёмся обычного запроса доступа).
+    func setSoundEnabled(_ on: Bool) {
+        guard on else {
+            endRoute()
+            return
+        }
+        guard started else { return }
+        requestListenAccess()
+    }
+
+    /// Физические колонки Мака — в обход «Утка звук», наушников, Bluetooth
+    /// или чего угодно ещё выбранного прямо сейчас. Сигналы, которые обязаны
+    /// быть услышаны (будильник), идут именно сюда, а не туда, куда сейчас
+    /// по случайности ведёт системный выход.
+    func builtInSpeakersID() -> AudioDeviceID? {
+        for id in deviceIDs() {
+            guard readUID(id) != virtualUID, outputChannels(id) > 0 else { continue }
+            let transport: UInt32 = readValue(id, kAudioDevicePropertyTransportType) ?? 0
+            if transport == kAudioDeviceTransportTypeBuiltIn { return id }
+        }
+        return nil
+    }
+
+    private var alarmEngines: [AVAudioEngine] = []
+
+    /// Играет файл напрямую в физические колонки — не через «Утка звук» и не
+    /// через то, что сейчас выбрано системой. Если колонок не нашлось
+    /// (например, это Мак без встроенных динамиков), играет обычным путём.
+    func playThroughSpeakers(_ url: URL) {
+        guard let deviceID = builtInSpeakersID(), let file = try? AVAudioFile(forReading: url) else {
+            NSSound(contentsOf: url, byReference: true)?.play()
+            return
+        }
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: file.processingFormat)
+        if let audioUnit = engine.outputNode.audioUnit {
+            var targetDevice = deviceID
+            AudioUnitSetProperty(
+                audioUnit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                &targetDevice, UInt32(MemoryLayout<AudioDeviceID>.size)
+            )
+        }
+        guard (try? engine.start()) != nil else {
+            NSSound(contentsOf: url, byReference: true)?.play()
+            return
+        }
+        alarmEngines.append(engine)
+        player.scheduleFile(file, at: nil) { [weak self] in
+            DispatchQueue.main.async {
+                engine.stop()
+                self?.alarmEngines.removeAll { $0 === engine }
+            }
+        }
+        player.play()
     }
 
     /// Выход, выбранный кнопкой на полосе.

@@ -550,9 +550,11 @@ final class SettingsPanel: NSObject {
         shotDisposal.selectedSegment = ShotDisposal.allCases.firstIndex(of: ShelfModel.shotDisposal) ?? 0
     }
 
-    /// Включает источники звука на полосе. Поиск не трогает.
+    /// Включает источники звука на полосе и саму петлю «Утка звук». Поиск не трогает.
     @objc private func soundToggled() {
-        IslandBar.sound = soundSwitch.state == .on
+        let on = soundSwitch.state == .on
+        IslandBar.sound = on
+        AudioOutput.shared.setSoundEnabled(on)
         onIslandBar?()
     }
 
@@ -635,6 +637,7 @@ final class SettingsPanel: NSObject {
         canInstall = false
         updateButton.isEnabled = false
         restoreButton.isEnabled = false
+        updateLine.textColor = UtkaChrome.dim
         updateLine.stringValue = "Проверяю общий main…"
         applyPageVisibility()
         body.needsLayout = true
@@ -646,7 +649,8 @@ final class SettingsPanel: NSObject {
                 self.updateButton.isEnabled = true
                 self.restoreButton.isEnabled = true
                 self.canInstall = report.canInstall
-                self.updateLine.stringValue = report.text
+                self.updateLine.stringValue = report.isUpToDate ? "✓ \(report.text)" : report.text
+                self.updateLine.textColor = report.isUpToDate ? .systemGreen : UtkaChrome.dim
                 self.applyPageVisibility()
                 self.body.needsLayout = true
             }
