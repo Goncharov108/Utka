@@ -30,8 +30,8 @@ enum IslandBar {
         UserDefaults.standard.set(old == 2, forKey: searchKey)
     }
 }
-private enum SettingsPage: Int {
-    case theme, sections, sound, search, shot, translate, updates
+private enum SettingsPage: Int, CaseIterable {
+    case theme, sections, sound, search, shot, clipboard, translate, updates
 
     var title: String {
         switch self {
@@ -40,6 +40,7 @@ private enum SettingsPage: Int {
         case .sound: return "Звук"
         case .search: return "Поиск"
         case .shot: return "Полка"
+        case .clipboard: return "Буфер"
         case .translate: return "Перевод"
         case .updates: return "Обновления"
         }
@@ -59,6 +60,8 @@ final class SettingsPanel: NSObject {
     var onShotDisposal: ((ShotDisposal) -> Void)?
     /// Меняет верхнюю полосу островка.
     var onIslandBar: (() -> Void)?
+    /// Настройки буфера поменяли — история применяет их сразу.
+    var onClipboardPrefs: (() -> Void)?
 
     private let window: NSWindow
     private let body = SettingsBody()
@@ -108,6 +111,24 @@ final class SettingsPanel: NSObject {
     private let shotCleanup = NSSwitch()
     private let shotDisposalLabel = UtkaChrome.label("Удалять скрин из полки", size: 13)
     private let shotDisposal = NSSegmentedControl()
+    /// Настройки буфера. Страница «Буфер» пишет их сразу.
+    private let clipPrefs = ClipboardPrefs()
+    /// Главный выключатель истории буфера.
+    private let clipRemember = SwitchRow("Запоминать скопированное")
+    /// Пропускать то, что менеджеры паролей пометили скрытым.
+    private let clipSecrets = SwitchRow("Не сохранять пароли")
+    /// Что считается паролем — под тумблером.
+    private let clipSecretsCaption = caption("Пароли, которые менеджер паролей пометил как скрытые")
+    /// Срок записей. Число и единица — под ним, пока он включён.
+    private let clipExpire = SwitchRow("Удалять записи старше")
+    /// Сколько единиц срока, от 1 до 999.
+    private let clipAge = NSTextField()
+    /// Единица срока: минут, часов, дней.
+    private let clipAgeUnit = NSSegmentedControl()
+    /// Чистить историю при первом запуске после перезагрузки.
+    private let clipReboot = SwitchRow("Чистить после перезагрузки Мака")
+    /// Окно «Убрать / Оставить» перед «Очистить».
+    private let clipConfirm = SwitchRow("Спрашивать перед очисткой")
     private let soundLabel = UtkaChrome.label("Звук", size: 13, weight: .semibold)
     private let soundSwitch = NSSwitch()
     private let soundCaption = caption(
@@ -184,31 +205,24 @@ final class SettingsPanel: NSObject {
         shotCleanup.target = self
         shotCleanup.action = #selector(shotCleanupToggled)
         shotCleanup.state = ShelfModel.deleteShotAfterUse ? .on : .off
-        shotDisposal.segmentCount = ShotDisposal.allCases.count
-        for (index, option) in ShotDisposal.allCases.enumerated() {
-            shotDisposal.setLabel(option.title, forSegment: index)
-        }
-        shotDisposal.trackingMode = .selectOne
-        shotDisposal.segmentDistribution = .fillEqually
-        shotDisposal.font = UtkaChrome.font(12, weight: .medium)
-        shotDisposal.target = self
-        shotDisposal.action = #selector(shotDisposalChanged)
+        segments(shotDisposal, ShotDisposal.allCases.map(\.title), action: #selector(shotDisposalChanged))
         refreshShotDisposal()
+        clipRows.forEach { wire($0.toggle, action: #selector(clipboardToggled(_:))) }
+        clipAge.font = UtkaChrome.font(13)
+        clipAge.alignment = .center
+        clipAge.bezelStyle = .roundedBezel
+        clipAge.target = self
+        clipAge.action = #selector(clipAgeCommitted)
+        clipAge.cell?.sendsActionOnEndEditing = true
+        segments(clipAgeUnit, ClipboardPrefs.Unit.allCases.map(\.title), action: #selector(clipUnitChanged))
+        refreshClipboard()
         soundNote.maximumNumberOfLines = 3
         soundNote.lineBreakMode = .byWordWrapping
         soundNote.cell?.wraps = true
         mount(soundInstall, title: "Установить плагин звука", action: #selector(installSoundPlugin))
         wire(soundSwitch, action: #selector(soundToggled))
         wire(searchSwitch, action: #selector(searchToggled))
-        lookMode.segmentCount = 3
-        lookMode.setLabel("Как в системе", forSegment: 0)
-        lookMode.setLabel("Светлая", forSegment: 1)
-        lookMode.setLabel("Тёмная", forSegment: 2)
-        lookMode.trackingMode = .selectOne
-        lookMode.segmentDistribution = .fillEqually
-        lookMode.font = UtkaChrome.font(12, weight: .medium)
-        lookMode.target = self
-        lookMode.action = #selector(lookModeChanged)
+        segments(lookMode, ["Как в системе", "Светлая", "Тёмная"], action: #selector(lookModeChanged))
         lookMode.selectedSegment = IslandLook.mode.rawValue
         glassSlider.minValue = 0
         glassSlider.maxValue = 1
@@ -249,15 +263,8 @@ final class SettingsPanel: NSObject {
         body.addSubview(railLine)
         body.addSubview(nest)
         body.addSubview(chevron)
-        sideButtons = [
-            makeRow("Островок", tag: -1) { [weak self] in self?.islandClicked() },
-            makeRow(SettingsPage.sections.title, tag: SettingsPage.sections.rawValue) { [weak self] in self?.pick(.sections) },
-            makeRow(SettingsPage.sound.title, tag: SettingsPage.sound.rawValue) { [weak self] in self?.pick(.sound) },
-            makeRow(SettingsPage.search.title, tag: SettingsPage.search.rawValue) { [weak self] in self?.pick(.search) },
-            makeRow(SettingsPage.shot.title, tag: SettingsPage.shot.rawValue) { [weak self] in self?.pick(.shot) },
-            makeRow(SettingsPage.translate.title, tag: SettingsPage.translate.rawValue) { [weak self] in self?.pick(.translate) },
-            makeRow(SettingsPage.updates.title, tag: SettingsPage.updates.rawValue) { [weak self] in self?.pick(.updates) }
-        ]
+        sideButtons = [makeRow("Островок", tag: -1) { [weak self] in self?.islandClicked() }]
+            + SettingsPage.allCases.filter { $0 != .theme }.map { pageRow($0) }
         for row in sideButtons where row.rowTag >= 0 && SettingsPage(rawValue: row.rowTag)?.underIsland == true {
             row.removeFromSuperview()
             nest.addSubview(row)
@@ -290,6 +297,7 @@ final class SettingsPanel: NSObject {
         body.addSubview(shotCleanup)
         body.addSubview(shotDisposalLabel)
         body.addSubview(shotDisposal)
+        (clipViews + [clipAge, clipAgeUnit]).forEach { body.addSubview($0) }
         body.addSubview(soundLabel)
         body.addSubview(soundSwitch)
         body.addSubview(soundCaption)
@@ -336,6 +344,7 @@ final class SettingsPanel: NSObject {
         shotCleanup.state = ShelfModel.deleteShotAfterUse ? .on : .off
         refreshShotDisposal()
         refreshIslandSwitches()
+        refreshClipboard()
         refreshNative()
         select(.theme, animated: false)
     }
@@ -346,6 +355,11 @@ final class SettingsPanel: NSObject {
         row.onClick = click
         body.addSubview(row)
         return row
+    }
+
+    /// Пункт меню, который открывает свою страницу.
+    private func pageRow(_ page: SettingsPage) -> MenuRow {
+        makeRow(page.title, tag: page.rawValue) { [weak self] in self?.pick(page) }
     }
 
     private func pick(_ next: SettingsPage) {
@@ -397,6 +411,11 @@ final class SettingsPanel: NSObject {
         let disposal = shot && shotCleanup.state == .on
         shotDisposalLabel.isHidden = !disposal
         shotDisposal.isHidden = !disposal
+        let clipboard = page == .clipboard
+        clipViews.forEach { $0.isHidden = !clipboard }
+        let age = clipboard && clipExpire.toggle.state == .on
+        clipAge.isHidden = !age
+        clipAgeUnit.isHidden = !age
         let sound = page == .sound
         let plugged = SoundPlugin.isInstalled
         soundLabel.isHidden = !sound
@@ -550,6 +569,56 @@ final class SettingsPanel: NSObject {
         shotDisposal.selectedSegment = ShotDisposal.allCases.firstIndex(of: ShelfModel.shotDisposal) ?? 0
     }
 
+    /// Тумблеры страницы «Буфер» сверху вниз.
+    private var clipRows: [SwitchRow] { [clipRemember, clipSecrets, clipExpire, clipReboot, clipConfirm] }
+
+    /// Всё на странице «Буфер», кроме числа и единицы срока: те видны, только пока срок включён.
+    private var clipViews: [NSView] { clipRows.flatMap { [$0.label, $0.toggle] } + [clipSecretsCaption] }
+
+    /// Тумблер страницы «Буфер»: пишет свою настройку, история применяет её сразу.
+    @objc private func clipboardToggled(_ sender: NSSwitch) {
+        let on = sender.state == .on
+        switch sender {
+        case clipRemember.toggle: clipPrefs.remember = on
+        case clipSecrets.toggle: clipPrefs.skipSecrets = on
+        case clipExpire.toggle: clipPrefs.expires = on
+        case clipReboot.toggle: clipPrefs.clearOnReboot = on
+        case clipConfirm.toggle: clipPrefs.confirmClear = on
+        default: return
+        }
+        applyPageVisibility()
+        body.needsLayout = true
+        onClipboardPrefs?()
+    }
+
+    /// Число срока — по Return или уходу из поля. Пустое, ноль и больше 999 не сохраняются: в поле возвращается прежнее.
+    @objc private func clipAgeCommitted() {
+        let typed = Int(clipAge.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
+        if ClipboardPrefs.ageRange.contains(typed), typed != clipPrefs.ageCount {
+            clipPrefs.ageCount = typed
+            onClipboardPrefs?()
+        }
+        clipAge.stringValue = String(clipPrefs.ageCount)
+    }
+
+    /// Единица срока. Записи старше нового срока уходят сразу.
+    @objc private func clipUnitChanged() {
+        guard let unit = ClipboardPrefs.Unit(rawValue: clipAgeUnit.selectedSegment) else { return }
+        clipPrefs.ageUnit = unit
+        onClipboardPrefs?()
+    }
+
+    /// Ставит страницу «Буфер» по сохранённым настройкам.
+    private func refreshClipboard() {
+        clipRemember.toggle.state = clipPrefs.remember ? .on : .off
+        clipSecrets.toggle.state = clipPrefs.skipSecrets ? .on : .off
+        clipExpire.toggle.state = clipPrefs.expires ? .on : .off
+        clipReboot.toggle.state = clipPrefs.clearOnReboot ? .on : .off
+        clipConfirm.toggle.state = clipPrefs.confirmClear ? .on : .off
+        clipAge.stringValue = String(clipPrefs.ageCount)
+        clipAgeUnit.selectedSegment = clipPrefs.ageUnit.rawValue
+    }
+
     /// Включает источники звука на полосе и саму петлю «Утка звук». Поиск не трогает.
     @objc private func soundToggled() {
         let on = soundSwitch.state == .on
@@ -587,6 +656,19 @@ final class SettingsPanel: NSObject {
     private func wire(_ toggle: NSSwitch, action: Selector) {
         toggle.target = self
         toggle.action = action
+    }
+
+    /// Выбор одного из вариантов тем же гротеском, что и окно.
+    private func segments(_ control: NSSegmentedControl, _ labels: [String], action: Selector) {
+        control.segmentCount = labels.count
+        for (index, label) in labels.enumerated() {
+            control.setLabel(label, forSegment: index)
+        }
+        control.trackingMode = .selectOne
+        control.segmentDistribution = .fillEqually
+        control.font = UtkaChrome.font(12, weight: .medium)
+        control.target = self
+        control.action = action
     }
 
     /// Свой офлайн-движок перевода: utka-apps/utka-translate. Единственный
@@ -746,6 +828,8 @@ final class SettingsPanel: NSObject {
             y = layoutUpdates(text: text, y: y)
         case .shot:
             y = layoutShot(text: text, y: y)
+        case .clipboard:
+            y = layoutClipboard(text: text, y: y)
         }
         let sideBottom = pinUpdates(x: sideX, above: above, width: sideW, pageBottom: y)
         pourPill()
@@ -758,8 +842,7 @@ final class SettingsPanel: NSObject {
     private func layoutSidebar(x: CGFloat, y: CGFloat, width: CGFloat) -> CGFloat {
         let row: CGFloat = 34
         let gap: CGFloat = 2
-        guard sideButtons.count == 7 else { return y }
-        let island = sideButtons[0]
+        guard let island = sideButtons.first(where: { $0.rowTag < 0 }) else { return y }
         let children = sideButtons.filter { $0.rowTag >= 0 && SettingsPage(rawValue: $0.rowTag)?.underIsland == true }
         let rest = sideButtons.filter {
             $0.rowTag >= 0
@@ -1190,9 +1273,11 @@ final class SettingsPanel: NSObject {
         chrome.apply()
         strokeOverlay.needsDisplay = true
         let inkLabels = [titleLabel, soundLabel, searchLabel, soundReady, nativeReady, nativeTitle, versionLabel, shotCleanupLabel, shotDisposalLabel, lookLabel, glassLabel, accentLabel, strokeLabel, strokeColorLabel]
+            + clipRows.map(\.label)
         inkLabels.forEach { $0.textColor = UtkaChrome.ink }
-        let dimLabels = [soundCaption, searchCaption, translateCaption, soundNote, nativeNote, nativeState, updateLine]
+        let dimLabels = [soundCaption, searchCaption, translateCaption, soundNote, nativeNote, nativeState, updateLine, clipSecretsCaption]
         dimLabels.forEach { $0.textColor = UtkaChrome.dim }
+        clipAge.textColor = UtkaChrome.ink
         lookMode.selectedSegment = IslandLook.mode.rawValue
         glassSlider.doubleValue = IslandLook.glass
         if !accentWell.isActive { accentWell.color = IslandLook.accent }
@@ -1314,6 +1399,28 @@ final class SettingsPanel: NSObject {
         return y + 32
     }
 
+    /// Тумблеры буфера сверху вниз. Число и единица срока — под своим тумблером, пока он включён.
+    private func layoutClipboard(text: NSRect, y: CGFloat) -> CGFloat {
+        let gap: CGFloat = 12
+        var y = layoutToggle(clipRemember.label, clipRemember.toggle, text: text, y: y) + gap
+        y = layoutToggle(clipSecrets.label, clipSecrets.toggle, text: text, y: y) + 2
+        let captionHeight = fieldHeight(clipSecretsCaption, width: text.width)
+        clipSecretsCaption.frame = NSRect(x: text.minX, y: y, width: text.width, height: captionHeight)
+        y += captionHeight + gap
+        y = layoutToggle(clipExpire.label, clipExpire.toggle, text: text, y: y)
+        if clipExpire.toggle.state == .on {
+            y += 8
+            let row: CGFloat = 24
+            let ageHeight = ceil(clipAge.fittingSize.height)
+            clipAge.frame = NSRect(x: text.minX, y: y + (row - ageHeight) / 2, width: 52, height: ageHeight)
+            clipAgeUnit.frame = NSRect(x: text.minX + 60, y: y, width: min(220, text.width - 60), height: row)
+            y += row
+        }
+        y = layoutToggle(clipReboot.label, clipReboot.toggle, text: text, y: y + gap) + gap
+        y = layoutToggle(clipConfirm.label, clipConfirm.toggle, text: text, y: y)
+        return y + 8
+    }
+
     /// Длинная подпись переносится, а не обрезается многоточием.
     private func layoutWrappedToggle(_ label: NSTextField, _ toggle: NSSwitch, text: NSRect, y: CGFloat) -> CGFloat {
         let switchSize = toggle.fittingSize
@@ -1354,6 +1461,18 @@ final class SettingsPanel: NSObject {
         window.setFrame(NSRect(x: frame.minX, y: frame.maxY - height, width: frame.width, height: height), display: true)
     }
 
+}
+
+/// Ряд настроек: подпись слева, тумблер справа.
+private struct SwitchRow {
+    /// Подпись тем же гротеском, что и окно.
+    let label: NSTextField
+    /// Сам тумблер.
+    let toggle = NSSwitch()
+
+    init(_ title: String) {
+        label = UtkaChrome.label(title, size: 13)
+    }
 }
 
 /// Матовое стекло окна. Плотность вуали та же, что у капли.

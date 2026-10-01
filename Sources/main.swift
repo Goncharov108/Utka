@@ -29,6 +29,9 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settings.onShotDisposal = { [weak shelf] disposal in
             shelf?.setShotDisposal(disposal)
         }
+        settings.onClipboardPrefs = { [weak history] in
+            history?.applyPrefs()
+        }
         ShotEditor.shelf = shelf
         presets = PresetsModel(storeURL: support.appendingPathComponent("presets.json"))
 
@@ -54,6 +57,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.onCapture = { [weak self] in self?.captureRegion() }
         panel.onSettings = { [weak self] in self?.showSettings() }
         shelfView.onDrag = { [weak self] active in self?.hover.suspended = active }
+        clipboardView.onDrag = { [weak self] active in self?.hover.suspended = active }
         presetsView.onDrag = { [weak self] active in self?.hover.suspended = active }
         hover.extraHitRect = { [weak self] in
             guard let window = self?.panel.window, window.isVisible else { return nil }
@@ -69,7 +73,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         installStatusItem(mark: mark)
         reminder.onRingingChanged = { [weak self] id in self?.ringingChanged(id) }
         reminder.start()
-        history.startPolling()
+        history.start()
         shelf.startScreenshotWatch()
         hover.start()
         resumeCaptureIfGranted()
@@ -315,23 +319,153 @@ enum SelfCheck {
         }
     }
 
+    /// Отдельные настройки самопроверки. В конце стираются, настоящие настройки утки не трогаются.
+    private static let prefsSuite = "dev.goncharov.utka.selfcheck"
+
+    /// История буфера во временной папке и на отдельных настройках.
     private static func checkClipboard() {
+        guard let defaults = UserDefaults(suiteName: prefsSuite) else {
+            fail("нет отдельных настроек самопроверки")
+            return
+        }
+        defaults.removePersistentDomain(forName: prefsSuite)
+        defer { defaults.removePersistentDomain(forName: prefsSuite) }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("utka-clip-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let history = ClipboardHistory(storeURL: dir.appendingPathComponent("clipboard.json"))
-        history.consider(text: "a", hasFile: false)
-        history.consider(text: "a", hasFile: false)
-        history.consider(text: "  ", hasFile: false)
-        history.consider(text: "file", hasFile: true)
-        history.consider(text: "b", hasFile: false)
+        let prefs = ClipboardPrefs(defaults: defaults)
+        checkClipboardPrefs(prefs)
+        let history = scratchHistory(dir, prefs)
+        history.consider(text: "a")
+        history.consider(text: "a")
+        history.consider(text: "  ")
+        history.consider(text: "file", types: [NSPasteboard.PasteboardType.fileURL.rawValue])
+        history.consider(text: "b")
         let texts = history.items.map(\.text)
         if texts != ["b", "a"] { fail("история \(texts)") }
         for index in 0..<55 {
-            history.consider(text: "n\(index)", hasFile: false)
+            history.consider(text: "n\(index)")
         }
         if history.items.count != 50 { fail("лимит \(history.items.count)") }
         if history.items.first?.text != "n54" { fail("порядок") }
+        checkClipboardFilter(dir, prefs)
+        checkClipboardAge(dir, prefs)
+        checkClipboardLegacy(dir, prefs)
+        checkClipboardReboot(dir, prefs)
+    }
+
+    /// Чистая история в своём файле временной папки.
+    private static func scratchHistory(_ dir: URL, _ prefs: ClipboardPrefs) -> ClipboardHistory {
+        ClipboardHistory(storeURL: dir.appendingPathComponent("\(UUID().uuidString).json"), prefs: prefs)
+    }
+
+    /// Значения по умолчанию, и неверное число срока не сохраняется.
+    private static func checkClipboardPrefs(_ prefs: ClipboardPrefs) {
+        let flags = [prefs.remember, prefs.skipSecrets, prefs.expires, !prefs.clearOnReboot, prefs.confirmClear]
+        if flags.contains(false) || prefs.lifetime != 7 * 86_400 || prefs.ageUnit != .days {
+            fail("настройки буфера по умолчанию")
+        }
+        for wrong in [0, 1_000, -5] {
+            prefs.ageCount = wrong
+        }
+        if prefs.ageCount != 7 { fail("неверное число срока сохранилось: \(prefs.ageCount)") }
+        prefs.ageCount = 999
+        if prefs.ageCount != 999 { fail("999 не сохранилось") }
+    }
+
+    /// Скрытое не записывается при «Не сохранять пароли» и записывается без него. Временное и длинное — никогда.
+    private static func checkClipboardFilter(_ dir: URL, _ prefs: ClipboardPrefs) {
+        let plain = NSPasteboard.PasteboardType.string.rawValue
+        let secrets = ["org.nspasteboard.ConcealedType", "com.agilebits.onepassword", "de.petermaurer.TransientPasteboardType", "Pasteboard generator type", "net.antelle.keeweb"]
+        for mark in secrets {
+            if ClipboardHistory.accepts(types: [plain, mark], text: "x", skipSecrets: true) { fail("пропущена пометка пароля \(mark)") }
+            if !ClipboardHistory.accepts(types: [plain, mark], text: "x", skipSecrets: false) { fail("без настройки отсеяно \(mark)") }
+        }
+        let history = scratchHistory(dir, prefs)
+        prefs.skipSecrets = true
+        history.consider(text: "пароль", types: [plain, "org.nspasteboard.ConcealedType"])
+        if !history.items.isEmpty { fail("скрытое записалось \(history.items.map(\.text))") }
+        prefs.skipSecrets = false
+        history.consider(text: "пароль", types: [plain, "org.nspasteboard.ConcealedType"])
+        if history.items.map(\.text) != ["пароль"] { fail("скрытое без «Не сохранять пароли» \(history.items.map(\.text))") }
+        let long = String(repeating: "д", count: ClipboardHistory.textLimit + 1)
+        for skip in [true, false] {
+            prefs.skipSecrets = skip
+            history.consider(text: "временное", types: [plain, "org.nspasteboard.TransientType"])
+            history.consider(text: "сгенерированное", types: [plain, "org.nspasteboard.AutoGeneratedType"])
+            history.consider(text: long, types: [plain])
+        }
+        if history.items.map(\.text) != ["пароль"] { fail("временное или длинное записалось: \(history.items.count)") }
+        history.consider(text: String(repeating: "д", count: ClipboardHistory.textLimit), types: [plain])
+        if history.items.first?.text.count != ClipboardHistory.textLimit { fail("ровно 100 000 символов не записались") }
+    }
+
+    /// Запись уходит, когда становится старше срока, свежие остаются. Без срока ничего не уходит.
+    private static func checkClipboardAge(_ dir: URL, _ prefs: ClipboardPrefs) {
+        let now = Date()
+        let day: TimeInterval = 86_400
+        prefs.expires = true
+        prefs.ageCount = 7
+        prefs.ageUnit = .days
+        let url = dir.appendingPathComponent("age.json")
+        let history = ClipboardHistory(storeURL: url, prefs: prefs)
+        history.consider(text: "старая", at: now.addingTimeInterval(-7.5 * day))
+        history.consider(text: "свежая", at: now.addingTimeInterval(-day))
+        if history.items.map(\.text) != ["свежая", "старая"] { fail("срок раньше времени \(history.items.map(\.text))") }
+        history.dropExpired(now: now)
+        if history.items.map(\.text) != ["свежая"] { fail("срок 7 дней \(history.items.map(\.text))") }
+        if ClipboardHistory(storeURL: url, prefs: prefs).items.map(\.text) != ["свежая"] { fail("срок не дошёл до файла") }
+        history.dropExpired(now: now.addingTimeInterval(6.5 * day))
+        if !history.items.isEmpty { fail("свежая не ушла, когда постарела") }
+        prefs.ageUnit = .minutes
+        prefs.ageCount = 5
+        history.consider(text: "шесть минут", at: now.addingTimeInterval(-6 * 60))
+        history.consider(text: "четыре минуты", at: now.addingTimeInterval(-4 * 60))
+        history.dropExpired(now: now)
+        if history.items.map(\.text) != ["четыре минуты"] { fail("срок 5 минут \(history.items.map(\.text))") }
+        prefs.expires = false
+        history.consider(text: "вечная", at: now.addingTimeInterval(-400 * day))
+        let ageless = history.items.map(\.text)
+        history.dropExpired(now: now)
+        if ageless.first != "вечная" || history.items.map(\.text) != ageless { fail("без срока записи ушли \(history.items.map(\.text))") }
+    }
+
+    /// Старый clipboard.json без времени читается, записи получают время и сразу его сохраняют.
+    private static func checkClipboardLegacy(_ dir: URL, _ prefs: ClipboardPrefs) {
+        let url = dir.appendingPathComponent("legacy.json")
+        try? Data(#"[{"id":"1","text":"первая"},{"id":"2","text":"вторая"}]"#.utf8).write(to: url)
+        let opened = Date()
+        let history = ClipboardHistory(storeURL: url, prefs: prefs)
+        if history.items.map(\.text) != ["первая", "вторая"] { fail("старый файл \(history.items.map(\.text))") }
+        let stamped = history.items.allSatisfy { item in
+            guard let copiedAt = item.copiedAt else { return false }
+            return abs(copiedAt.timeIntervalSince(opened)) < 60
+        }
+        if !stamped { fail("записи старого файла без времени") }
+        let saved = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        if !saved.contains("copiedAt") { fail("время старых записей не сохранилось") }
+    }
+
+    /// Новое время загрузки системы чистит историю, только если «Чистить после перезагрузки» включено.
+    private static func checkClipboardReboot(_ dir: URL, _ prefs: ClipboardPrefs) {
+        if ClipboardHistory.rebooted(saved: nil, current: 1_000) { fail("первый запуск принят за перезагрузку") }
+        if ClipboardHistory.rebooted(saved: 1_000, current: 1_030) { fail("подвод часов принят за перезагрузку") }
+        if !ClipboardHistory.rebooted(saved: 1_000, current: 5_000) { fail("перезагрузка не замечена") }
+        let history = scratchHistory(dir, prefs)
+        prefs.bootTime = nil
+        prefs.clearOnReboot = true
+        history.consider(text: "до перезагрузки")
+        history.noteBoot(1_000)
+        history.noteBoot(1_000)
+        if history.items.isEmpty { fail("история ушла без перезагрузки") }
+        history.noteBoot(5_000)
+        if !history.items.isEmpty { fail("перезагрузка при включённой настройке не почистила историю") }
+        prefs.clearOnReboot = false
+        history.consider(text: "после перезагрузки")
+        let kept = history.items.map(\.text)
+        history.noteBoot(9_000)
+        if kept.isEmpty || history.items.map(\.text) != kept { fail("перезагрузка при выключенной настройке почистила историю") }
+        if prefs.bootTime != 9_000 { fail("время загрузки не сохранилось: \(prefs.bootTime ?? 0)") }
     }
 
     /// Счёт и единицы отвечают сразу, без индекса Spotlight.
