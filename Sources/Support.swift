@@ -356,8 +356,9 @@ final class FileCardView: NSView, NSDraggingSource {
     var onRemove: (() -> Void)?
     var onDrag: ((Bool) -> Void)?
     var onEdit: (() -> Void)? { didSet { updatePencil() } }
-    /// Захват порядка, как у строки раздела. У полки выключено, драг файла наружу не меняется.
-    var canReorder = false { didSet { refreshGrip() } }
+    /// Закрепы: внутри островка карточка меняется местами с соседями, за краем островка уносит файл наружу.
+    /// У полки выключено: там драг сразу уносит файл в другое приложение.
+    var canReorder = false { didSet { window?.invalidateCursorRects(for: self) } }
     var onReorderDrag: ((NSPoint) -> Void)?
     var onReorderDrop: (() -> Void)?
     /// Полка: драг начался, это имя нельзя сразу забирать со стола.
@@ -373,11 +374,10 @@ final class FileCardView: NSView, NSDraggingSource {
     private let nameLabel = UtkaChrome.label("", size: 11, color: UtkaChrome.dim)
     private let removeButton = NSButton()
     private let editButton = NSButton()
-    private let grip = NSImageView()
     private var didDrag = false
-    private var reorderArmed = false
     private var reorderMoved = false
     private var reorderGrab = NSPoint.zero
+    private var pressPoint = NSPoint.zero
     private var dragName: String?
     private var lastClickAt = Date.distantPast
     private var lastClickPoint = NSPoint.zero
@@ -407,15 +407,10 @@ final class FileCardView: NSView, NSDraggingSource {
         editButton.target = self
         editButton.action = #selector(editTapped)
         editButton.isHidden = true
-        grip.image = utkaSymbol("line.3.horizontal", point: 11, label: "Перетащить")
-        grip.imageScaling = .scaleProportionallyDown
-        grip.toolTip = "Перетащить"
-        grip.isHidden = true
         addSubview(iconView)
         addSubview(nameLabel)
         addSubview(removeButton)
         addSubview(editButton)
-        addSubview(grip)
         NotificationCenter.default.addObserver(self, selector: #selector(retintCard), name: IslandLook.changed, object: nil)
         retintCard()
     }
@@ -426,14 +421,6 @@ final class FileCardView: NSView, NSDraggingSource {
         nameLabel.textColor = UtkaChrome.dim
         removeButton.contentTintColor = UtkaChrome.dim
         editButton.contentTintColor = UtkaChrome.ink
-        grip.contentTintColor = UtkaChrome.dim
-    }
-
-    /// Три полоски только там, где карточку можно переставить. Файл наружу тащится с превью.
-    private func refreshGrip() {
-        grip.isHidden = !canReorder
-        needsLayout = true
-        window?.invalidateCursorRects(for: self)
     }
 
     /// Поднимает карточку, пока её тащат по сетке.
@@ -468,17 +455,18 @@ final class FileCardView: NSView, NSDraggingSource {
     override func layout() {
         super.layout()
         let labelH: CGFloat = 18
-        let gripPad: CGFloat = canReorder ? 16 : 0
         nameLabel.frame = NSRect(x: 6, y: 6, width: bounds.width - 12, height: labelH)
-        grip.frame = NSRect(x: (bounds.width - 18) / 2, y: labelH + 2, width: 18, height: 14)
-        iconView.frame = NSRect(x: 18, y: labelH + 8 + gripPad, width: bounds.width - 36, height: max(12, bounds.height - labelH - 28 - gripPad))
+        iconView.frame = NSRect(x: 18, y: labelH + 8, width: bounds.width - 36, height: max(12, bounds.height - labelH - 28))
         removeButton.frame = NSRect(x: bounds.width - 22, y: bounds.height - 20, width: 18, height: 18)
         editButton.frame = NSRect(x: 4, y: bounds.height - 20, width: 18, height: 18)
     }
 
     override func resetCursorRects() {
         guard canReorder else { return }
-        addCursorRect(grip.frame.insetBy(dx: -4, dy: -4), cursor: .openHand)
+        addCursorRect(bounds, cursor: .openHand)
+        for button in [removeButton, editButton] where !button.isHidden {
+            addCursorRect(button.frame, cursor: .arrow)
+        }
     }
 
     /// Щелчок по превью и имени идёт в карточку. Крестик и карандаш остаются кнопками.
@@ -489,15 +477,13 @@ final class FileCardView: NSView, NSDraggingSource {
         return self
     }
 
+    override var mouseDownCanMoveWindow: Bool { false }
+
     override func mouseDown(with event: NSEvent) {
         let local = convert(event.locationInWindow, from: nil)
-        if canReorder, grip.frame.insetBy(dx: -4, dy: -4).contains(local) {
-            reorderArmed = true
-            reorderMoved = false
-            reorderGrab = NSPoint(x: local.x, y: bounds.height - local.y)
-            return
-        }
-        reorderArmed = false
+        reorderMoved = false
+        reorderGrab = NSPoint(x: local.x, y: bounds.height - local.y)
+        pressPoint = local
         didDrag = false
         let now = Date()
         let near = hypot(event.locationInWindow.x - lastClickPoint.x, event.locationInWindow.y - lastClickPoint.y) < 6
@@ -512,10 +498,15 @@ final class FileCardView: NSView, NSDraggingSource {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        if reorderArmed {
+        if canReorder {
             dragReorder(with: event)
             return
         }
+        beginExport(with: event)
+    }
+
+    /// Файл уезжает в другое приложение тем же жестом, что и с полки.
+    private func beginExport(with event: NSEvent) {
         guard !didDrag, let url = fileURL else { return }
         didDrag = true
         dragName = url.lastPathComponent
@@ -546,23 +537,39 @@ final class FileCardView: NSView, NSDraggingSource {
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard reorderArmed else { return }
-        reorderArmed = false
         guard reorderMoved else { return }
         reorderMoved = false
         NSCursor.pop()
         onReorderDrop?()
     }
 
-    /// Тащит карточку за три полоски. Превью по-прежнему уносит файл наружу.
+    /// Тащит карточку по сетке. Мелкая дрожь руки при щелчке перестановкой не считается.
+    /// Курсор ушёл за край островка — карточка встаёт на место, а наружу едет файл.
     private func dragReorder(with event: NSEvent) {
         guard let parent = superview else { return }
         if !reorderMoved {
+            let local = convert(event.locationInWindow, from: nil)
+            guard hypot(local.x - pressPoint.x, local.y - pressPoint.y) > 4 else { return }
             reorderMoved = true
+            lastClickAt = .distantPast
             NSCursor.closedHand.push()
+        }
+        if leftWindow(event), fileURL != nil {
+            reorderMoved = false
+            NSCursor.pop()
+            onReorderDrop?()
+            beginExport(with: event)
+            return
         }
         let point = parent.convert(event.locationInWindow, from: nil)
         onReorderDrag?(NSPoint(x: point.x - reorderGrab.x, y: point.y - reorderGrab.y))
+    }
+
+    /// Курсор за пределами окна островка.
+    private func leftWindow(_ event: NSEvent) -> Bool {
+        guard let content = window?.contentView else { return false }
+        let point = content.convert(event.locationInWindow, from: nil)
+        return !content.bounds.contains(point)
     }
 
     /// Открывает файл той программой, которую Мак выбрал для этого типа. PDF — как обычный PDF.

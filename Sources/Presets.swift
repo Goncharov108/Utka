@@ -378,7 +378,7 @@ final class PresetsView: NSView {
         cards.forEach { $0.isHidden = tab != .files }
         let notesMove = rows.count > 1 && !focus
         rows.forEach { $0.canReorder = notesMove && !$0.isExpanded }
-        cards.forEach { $0.canReorder = cards.count > 1 }
+        cards.forEach { $0.canReorder = true }
 
         layoutContent()
         if focus {
@@ -412,7 +412,7 @@ final class PresetsView: NSView {
             card.consumeOnDrop = false
             card.onDrag = { [weak self] active in self?.onDrag?(active) }
             card.onRemove = { [weak self] in self?.askRemove(preset) }
-            card.canReorder = files.count > 1
+            card.canReorder = true
             card.onReorderDrag = { [weak self, weak card] origin in
                 guard let self, let card else { return }
                 self.dragFile(card, id: preset.id, to: origin)
