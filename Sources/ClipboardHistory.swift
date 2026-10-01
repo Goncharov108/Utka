@@ -3,6 +3,8 @@ import AppKit
 struct ClipItem: Codable, Equatable {
     var id: String
     var text: String
+    /// Когда скопировано. В старом clipboard.json поля нет.
+    var copiedAt: Date?
 }
 
 /// История скопированного текста. Картинки и файлы сюда не попадают.
@@ -61,7 +63,7 @@ final class ClipboardHistory {
         let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmed.isEmpty else { return }
         if items.first?.text == trimmed { return }
-        items.insert(ClipItem(id: UUID().uuidString, text: trimmed), at: 0)
+        items.insert(ClipItem(id: UUID().uuidString, text: trimmed, copiedAt: Date()), at: 0)
         if items.count > 50 {
             items.removeLast(items.count - 50)
         }
@@ -86,15 +88,25 @@ final class ClipboardHistory {
         consider(text: pb.string(forType: .string), hasFile: hasFile)
     }
 
+    /// Записям старого файла без времени ставит нынешнее и сразу сохраняет: срок пойдёт с этого запуска.
     private func load() {
         guard let data = try? Data(contentsOf: storeURL) else { return }
-        items = (try? JSONDecoder().decode([ClipItem].self, from: data)) ?? []
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        items = (try? decoder.decode([ClipItem].self, from: data)) ?? []
         if items.count > 50 { items = Array(items.prefix(50)) }
+        guard items.contains(where: { $0.copiedAt == nil }) else { return }
+        let now = Date()
+        for index in items.indices where items[index].copiedAt == nil {
+            items[index].copiedAt = now
+        }
+        save()
     }
 
     private func save() {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(items) else { return }
         try? data.write(to: storeURL, options: .atomic)
     }
