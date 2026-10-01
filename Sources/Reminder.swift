@@ -25,6 +25,7 @@ enum QuackerPrefs {
 
     private enum Key: String {
         case enabled = "quackerEnabled"
+        case repeats = "quackerRepeats"
         case intervalCount = "quackerIntervalCount"
         case intervalUnit = "quackerIntervalUnit"
     }
@@ -40,6 +41,18 @@ enum QuackerPrefs {
         }
         set {
             UserDefaults.standard.set(newValue, forKey: Key.enabled.rawValue)
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+    }
+
+    /// Повторять кряк, пока заметку не откроют. Без ключа — да.
+    static var repeats: Bool {
+        get {
+            guard UserDefaults.standard.object(forKey: Key.repeats.rawValue) != nil else { return true }
+            return UserDefaults.standard.bool(forKey: Key.repeats.rawValue)
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Key.repeats.rawValue)
             NotificationCenter.default.post(name: changed, object: nil)
         }
     }
@@ -113,49 +126,66 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
     func show(from view: NSView, initial: Date?, onPick: @escaping (Date?) -> Void) {
         self.onPick = onPick
         let initialDate = initial ?? Date().addingTimeInterval(600)
+        let canClear = initial != nil
 
-        calendarPicker.datePickerStyle = .clockAndCalendar
-        calendarPicker.datePickerElements = [.yearMonthDay]
-        calendarPicker.datePickerMode = .single
-        calendarPicker.minDate = Calendar.current.startOfDay(for: Date())
-        calendarPicker.dateValue = initialDate
-        calendarPicker.sizeToFit()
+        prepareCalendar(initialDate)
+        prepareTime(initialDate)
 
-        timePicker.datePickerStyle = .textFieldAndStepper
-        timePicker.datePickerElements = [.hourMinute]
-        timePicker.dateValue = initialDate
-        timePicker.sizeToFit()
-
-        let pad: CGFloat = 12
-        let calSize = calendarPicker.frame.size
-        let width = max(calSize.width, 200) + pad * 2
-        let timeLabel = UtkaChrome.label("Время", size: 12, color: UtkaChrome.dim)
-        timeLabel.sizeToFit()
+        let pad: CGFloat = 14
+        let gap: CGFloat = 14
         let buttonH: CGFloat = 28
-        let height = calSize.height + pad * 3 + timeLabel.frame.height + timePicker.frame.height + buttonH
+        let calFit = calendarPicker.fittingSize
+        let timeFit = timePicker.fittingSize
+        // Ширина по календарю: он занимает всю полосу, без «коробки в коробке».
+        let contentW = max(calFit.width, 280)
+        let width = contentW + pad * 2
+
+        let timeLabel = UtkaChrome.label("Время", size: 13, weight: .medium, color: UtkaChrome.dim)
+        timeLabel.sizeToFit()
+        let timeRowH = max(timeLabel.fittingSize.height, timeFit.height, 24)
+
+        let buttonsH = buttonH
+        let height = pad + calFit.height + gap + timeRowH + gap + buttonsH + pad
 
         let root = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        var y = height - pad - calSize.height
-        calendarPicker.frame = NSRect(x: (width - calSize.width) / 2, y: y, width: calSize.width, height: calSize.height)
+        var y = height - pad - calFit.height
+
+        calendarPicker.frame = NSRect(x: pad, y: y, width: contentW, height: calFit.height)
         root.addSubview(calendarPicker)
 
-        y -= pad + timeLabel.frame.height
-        timeLabel.frame = NSRect(x: pad, y: y + 2, width: 60, height: timeLabel.frame.height)
+        y -= gap + timeRowH
+        let labelW = ceil(timeLabel.fittingSize.width)
+        timeLabel.frame = NSRect(
+            x: pad,
+            y: y + (timeRowH - timeLabel.fittingSize.height) / 2,
+            width: labelW,
+            height: timeLabel.fittingSize.height
+        )
         root.addSubview(timeLabel)
-        timePicker.frame = NSRect(x: pad + 64, y: y - 2, width: timePicker.frame.width, height: timePicker.frame.height)
+        let timeX = pad + labelW + 12
+        timePicker.frame = NSRect(
+            x: timeX,
+            y: y + (timeRowH - timeFit.height) / 2,
+            width: min(timeFit.width + 8, contentW - labelW - 12),
+            height: timeFit.height
+        )
         root.addSubview(timePicker)
 
         y = pad
-        let setButton = NSButton(title: "Поставить", target: self, action: #selector(setTapped))
-        setButton.bezelStyle = .rounded
-        setButton.frame = NSRect(x: pad, y: y, width: 94, height: buttonH)
-        root.addSubview(setButton)
-        if initial != nil {
-            let clearButton = NSButton(title: "Снять", target: self, action: #selector(clearTapped))
-            clearButton.bezelStyle = .rounded
-            clearButton.frame = NSRect(x: pad + 100, y: y, width: 94, height: buttonH)
+        let setButton = makeActionButton(title: "Поставить", action: #selector(setTapped))
+        if canClear {
+            let clearButton = makeActionButton(title: "Снять", action: #selector(clearTapped))
+            let buttonGap: CGFloat = 8
+            let buttonW = floor((contentW - buttonGap) / 2)
+            setButton.frame = NSRect(x: pad, y: y, width: buttonW, height: buttonH)
+            clearButton.frame = NSRect(x: pad + buttonW + buttonGap, y: y, width: buttonW, height: buttonH)
+            root.addSubview(setButton)
             root.addSubview(clearButton)
+        } else {
+            setButton.frame = NSRect(x: pad, y: y, width: contentW, height: buttonH)
+            root.addSubview(setButton)
         }
+
         let controller = NSViewController()
         controller.view = root
         popover.contentViewController = controller
@@ -163,6 +193,44 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
         popover.delegate = self
         onPresenting?(true)
         popover.show(relativeTo: view.bounds, of: view, preferredEdge: .maxY)
+    }
+
+    /// Календарь без системной обводки и focus ring — иначе синяя «рамка в рамке».
+    private func prepareCalendar(_ date: Date) {
+        calendarPicker.datePickerStyle = .clockAndCalendar
+        calendarPicker.datePickerElements = [.yearMonthDay]
+        calendarPicker.datePickerMode = .single
+        calendarPicker.minDate = Calendar.current.startOfDay(for: Date())
+        calendarPicker.dateValue = date
+        calendarPicker.isBordered = false
+        calendarPicker.drawsBackground = false
+        calendarPicker.focusRingType = .none
+        if let cell = calendarPicker.cell as? NSDatePickerCell {
+            cell.drawsBackground = false
+            cell.backgroundColor = .clear
+        }
+        // У части сборок macOS обводка остаётся на слое ячейки — гасим явно.
+        calendarPicker.wantsLayer = true
+        calendarPicker.layer?.borderWidth = 0
+        calendarPicker.layer?.borderColor = NSColor.clear.cgColor
+        calendarPicker.sizeToFit()
+    }
+
+    /// Поле времени без лишнего кольца фокуса.
+    private func prepareTime(_ date: Date) {
+        timePicker.datePickerStyle = .textFieldAndStepper
+        timePicker.datePickerElements = [.hourMinute]
+        timePicker.dateValue = date
+        timePicker.focusRingType = .none
+        timePicker.sizeToFit()
+    }
+
+    /// Кнопка действия тем же гротеском, что остальная утка.
+    private func makeActionButton(title: String, action: Selector) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.bezelStyle = .rounded
+        button.font = UtkaChrome.font(13, weight: .medium)
+        return button
     }
 
     func popoverDidClose(_ notification: Notification) {
@@ -291,15 +359,16 @@ final class ReminderEngine {
         check()
     }
 
-    /// Один раз крякнуть и ничего не услышать — не напоминание. Повторяем,
-    /// пока заметку не откроют, с интервалом из настроек крякера.
+    /// Один раз крякнуть. Если повтор включён — дальше с интервалом, пока заметку не откроют.
     private func startQuacking() {
         guard QuackerPrefs.enabled else {
             stopQuacking()
             return
         }
-        quack()
         quackTimer?.invalidate()
+        quackTimer = nil
+        quack()
+        guard QuackerPrefs.repeats else { return }
         let timer = Timer(timeInterval: QuackerPrefs.intervalSeconds, repeats: true) { [weak self] _ in
             self?.quack()
         }
