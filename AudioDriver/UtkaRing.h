@@ -11,12 +11,15 @@
 /// Общее кольцо между плагином и Уткой. Раскладка одна на оба файла.
 #define UTKA_RING_NAME "/utka-audio-ring"
 #define UTKA_RING_MAGIC 0x55544B41u
-#define UTKA_RING_VERSION 2u
+#define UTKA_RING_VERSION 3u
 #define UTKA_RING_FRAMES 16384u
 #define UTKA_RING_CHANNELS 2u
 #define UTKA_RING_RATE 48000u
 #define UTKA_RING_TARGET 2048u
 #define UTKA_DEVICE_UID "dev.goncharov.utka.output"
+#define UTKA_PLUGIN_BUNDLE_ID "dev.goncharov.utka.audio"
+/// Селектор «толкнуть драйвер»: разослать смену публикации устройства ('utkp').
+#define UTKA_PUBLISH_SELECTOR 0x75746B70u
 
 _Static_assert((UTKA_RING_FRAMES & (UTKA_RING_FRAMES - 1u)) == 0u, "ёмкость кольца должна быть степенью двух");
 
@@ -27,6 +30,8 @@ typedef struct UtkaRing {
     uint32_t channels;
     uint32_t frameCapacity;
     uint32_t active;
+    /// 1 — «Утка звук» видно в меню выходов macOS; 0 — спрятано.
+    _Atomic uint32_t published;
     /// Следующий кадр ленты, который ещё не записан. Индекс в кольце — номер по маске.
     _Atomic uint64_t writeFrame;
     /// Растёт, когда лента времени начинается заново.
