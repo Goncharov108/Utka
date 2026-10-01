@@ -694,8 +694,22 @@ final class TextRowView: NSView {
         addSubview(selectionButton)
         addSubview(collapseButton)
         NotificationCenter.default.addObserver(self, selector: #selector(retintRow), name: IslandLook.changed, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(quackerChanged), name: QuackerPrefs.changed, object: nil)
         updateExpanded()
         retintRow()
+        applyAlarmVisibility()
+    }
+
+    /// Крякер выключили — кнопку будильника убрать, место не оставлять.
+    @objc private func quackerChanged() {
+        applyAlarmVisibility()
+        needsLayout = true
+        window?.invalidateCursorRects(for: self)
+    }
+
+    /// Кнопка будильника только при включённом крякере.
+    private func applyAlarmVisibility() {
+        alarmButton.isHidden = !QuackerPrefs.enabled
     }
 
     /// Текст и карточка строки читаются и в светлом виде.
@@ -780,11 +794,17 @@ final class TextRowView: NSView {
         let head = TextRowView.collapsedHeight
         let top = bounds.height - head
         let mid = top + (head - 18) / 2
+        let showAlarm = QuackerPrefs.enabled
+        alarmButton.isHidden = !showAlarm
         deleteButton.frame = NSRect(x: bounds.width - 28, y: mid, width: 22, height: 18)
         expandButton.frame = NSRect(x: bounds.width - 54, y: mid, width: 22, height: 18)
         copyButton.frame = NSRect(x: bounds.width - 80, y: mid, width: 22, height: 18)
-        alarmButton.frame = NSRect(x: bounds.width - 106, y: mid, width: 22, height: 18)
-        let textW = bounds.width - 122
+        var trail: CGFloat = 96
+        if showAlarm {
+            alarmButton.frame = NSRect(x: bounds.width - 106, y: mid, width: 22, height: 18)
+            trail = 122
+        }
+        let textW = bounds.width - trail
         if isExpanded || detailLabel.isHidden {
             titleLabel.frame = NSRect(x: 10, y: top + (head - 18) / 2, width: textW, height: 18)
         } else {
@@ -801,8 +821,13 @@ final class TextRowView: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func resetCursorRects() {
+        let controls = [deleteButton, copyButton, expandButton, alarmButton]
+        for button in controls where !button.isHidden {
+            addCursorRect(button.frame, cursor: .arrow)
+        }
         guard canReorder, !isExpanded else { return }
-        let drag = NSRect(x: 0, y: bounds.height - TextRowView.collapsedHeight, width: copyButton.frame.minX - 4, height: TextRowView.collapsedHeight)
+        let dragEnd = (controls.filter { !$0.isHidden }.map(\.frame.minX).min() ?? bounds.width) - 4
+        let drag = NSRect(x: 0, y: bounds.height - TextRowView.collapsedHeight, width: max(0, dragEnd), height: TextRowView.collapsedHeight)
         addCursorRect(drag, cursor: .openHand)
     }
 

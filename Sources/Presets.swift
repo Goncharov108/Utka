@@ -38,7 +38,8 @@ final class PresetsModel {
     var files: [Preset] { items.filter { $0.kind == "file" } }
 
     func addText(title: String, body: String, dueAt: Date? = nil) {
-        items.insert(Preset(id: UUID().uuidString, kind: "text", title: title, body: body, bookmark: nil, path: nil, dueAt: dueAt, alarmAcknowledged: nil), at: 0)
+        let alarm = QuackerPrefs.enabled ? dueAt : nil
+        items.insert(Preset(id: UUID().uuidString, kind: "text", title: title, body: body, bookmark: nil, path: nil, dueAt: alarm, alarmAcknowledged: nil), at: 0)
         save()
         onChange?()
     }
@@ -109,7 +110,9 @@ final class PresetsModel {
     }
 
     /// Будильник у заметки. nil — снять. Смена даты сбрасывает «уже открывали».
+    /// При выключенном крякере новые даты не ставятся; старые dueAt в файле не трогаем.
     func setAlarm(id: String, date: Date?) {
+        guard QuackerPrefs.enabled || date == nil else { return }
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         items[index].dueAt = date
         items[index].alarmAcknowledged = nil
@@ -241,7 +244,17 @@ final class PresetsView: NSView {
         registerForDraggedTypes([.fileURL])
         model.onChange = { [weak self] in self?.modelChanged() }
         NotificationCenter.default.addObserver(self, selector: #selector(retintPresets), name: IslandLook.changed, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(quackerChanged), name: QuackerPrefs.changed, object: nil)
         rebuild()
+    }
+
+    /// Крякер выключили — кнопку в форме новой заметки убрать.
+    @objc private func quackerChanged() {
+        if !QuackerPrefs.enabled {
+            pendingAlarmDate = nil
+            updateAlarmButton()
+        }
+        applyLayout()
     }
 
     /// Поля и подписи заготовок под текущий вид.
@@ -317,6 +330,7 @@ final class PresetsView: NSView {
         titleField.isHidden = !showNotes
         bodyField.isHidden = !showNotes
         addButton.isHidden = !showNotes
+        alarmButton.isHidden = !showNotes || !QuackerPrefs.enabled
         errorLabel.isHidden = !showNotes
 
         if focus {
@@ -327,10 +341,20 @@ final class PresetsView: NSView {
             let formY: CGFloat = 4
             let formH: CGFloat = 26
             let plus: CGFloat = 26
-            let titleW = min(140, max(72, (bounds.width - plus * 2 - 24) * 0.34))
+            let showAlarm = QuackerPrefs.enabled
+            alarmButton.isHidden = !showAlarm
+            let alarmSlots: CGFloat = showAlarm ? 2 : 1
+            let titleW = min(140, max(72, (bounds.width - plus * alarmSlots - 24) * 0.34))
             titleField.frame = NSRect(x: 0, y: formY, width: titleW, height: formH)
-            bodyField.frame = NSRect(x: titleW + 8, y: formY, width: max(40, bounds.width - titleW - plus * 2 - 24), height: formH)
-            alarmButton.frame = NSRect(x: bounds.width - plus * 2 - 8, y: formY, width: plus, height: formH)
+            bodyField.frame = NSRect(
+                x: titleW + 8,
+                y: formY,
+                width: max(40, bounds.width - titleW - plus * alarmSlots - 24),
+                height: formH
+            )
+            if showAlarm {
+                alarmButton.frame = NSRect(x: bounds.width - plus * 2 - 8, y: formY, width: plus, height: formH)
+            }
             addButton.frame = NSRect(x: bounds.width - plus, y: formY, width: plus, height: formH)
             errorLabel.frame = NSRect(x: 0, y: formY + formH + 2, width: bounds.width - plus - 8, height: 14)
             let textY = formY + formH + 18
