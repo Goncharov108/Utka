@@ -111,7 +111,7 @@ final class SettingsPanel: NSObject {
     private let soundLabel = UtkaChrome.label("Звук", size: 13, weight: .semibold)
     private let soundSwitch = NSSwitch()
     private let soundCaption = UtkaChrome.label(
-        "Плагин «Утка звук» нужен, чтобы одним кликом перенести звук между мониторами и наушниками; на одном мониторе он не нужен.",
+        "Плагин «Утка звук» даёт менять громкость на мониторе и в наушниках, подключённых к монитору. Без него macOS громкость там не регулирует. Переключать выходы можно и без плагина.",
         size: 12,
         color: UtkaChrome.dim
     )
