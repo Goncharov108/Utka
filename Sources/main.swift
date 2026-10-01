@@ -9,8 +9,12 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var shelf: ShelfModel!
     private var presets: PresetsModel!
     private var presetsView: PresetsView!
+    private var reminder: ReminderEngine!
     private var statusItem: NSStatusItem!
     private var toggleItem: NSMenuItem!
+    private var reminderItem: NSMenuItem!
+    private var statusImage: NSImage?
+    private var blinkTimer: Timer?
     private let settings = SettingsPanel()
     private var capturing = false
     private var askingCapture = false
@@ -32,6 +36,8 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let clipboardView = ClipboardView(history: history)
         presetsView = PresetsView(model: presets)
         presetsView.copyText = { [weak self] text in self?.history.copyToPasteboard(text) }
+        reminder = ReminderEngine(model: presets)
+        presetsView.onAlarmOpened = { [weak self] id in self?.reminder.acknowledge(id: id) }
         let translator = TranslatorView()
         let mark = Bundle.main.url(forResource: "utka-mark", withExtension: "png").flatMap { NSImage(contentsOf: $0) }
 
@@ -61,6 +67,8 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hover.enabled = UserDefaults.standard.object(forKey: "enabled") as? Bool ?? true
 
         installStatusItem(mark: mark)
+        reminder.onRingingChanged = { [weak self] id in self?.ringingChanged(id) }
+        reminder.start()
         history.startPolling()
         shelf.startScreenshotWatch()
         hover.start()
@@ -81,10 +89,15 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let image = mark.map { MenuMark.template(from: $0) } ?? NSImage(systemSymbolName: "bird", accessibilityDescription: "Утка")
         image?.isTemplate = true
         image?.size = NSSize(width: 18, height: 18)
+        statusImage = image
         statusItem.button?.image = image
         statusItem.button?.appearsDisabled = !hover.enabled
         let menu = NSMenu()
         menu.delegate = self
+        reminderItem = NSMenuItem(title: "", action: #selector(openRinging), keyEquivalent: "")
+        reminderItem.target = self
+        reminderItem.isHidden = true
+        menu.addItem(reminderItem)
         toggleItem = NSMenuItem(title: "Включена", action: #selector(toggleEnabled), keyEquivalent: "")
         toggleItem.target = self
         menu.addItem(toggleItem)
@@ -103,6 +116,40 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         toggleItem.state = hover.enabled ? .on : .off
         statusItem.button?.appearsDisabled = !hover.enabled
+    }
+
+    /// Утка кричит — мигает значком в строке меню и открывает пункт быстрого перехода.
+    private func ringingChanged(_ id: String?) {
+        presetsView.ringingID = id
+        reminderItem.isHidden = id == nil
+        reminderItem.title = id.flatMap { ringingID in
+            presets.texts.first { $0.id == ringingID }.map { "⏰ \($0.title) — показать" }
+        } ?? ""
+        blinkTimer?.invalidate()
+        blinkTimer = nil
+        guard id != nil else {
+            statusItem.button?.alphaValue = 1
+            return
+        }
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.statusItem.button?.alphaValue = (self.statusItem.button?.alphaValue ?? 1) < 1 ? 1 : 0.35
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        blinkTimer = timer
+    }
+
+    /// Пункт меню «⏰ … — показать»: открывает островок на этой заметке и гасит крик.
+    @objc private func openRinging() {
+        guard let id = reminder.ringingID else { return }
+        let point = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main
+        guard let screen else { return }
+        setEnabled(true)
+        panel.show(on: screen)
+        panel.select(slotID: IslandSection.presets.slotID)
+        presetsView.openNote(id: id)
+        reminder.acknowledge(id: id)
     }
 
     @objc private func showNow() {
