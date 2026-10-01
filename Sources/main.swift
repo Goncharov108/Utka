@@ -320,15 +320,15 @@ enum SelfCheck {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let history = ClipboardHistory(storeURL: dir.appendingPathComponent("clipboard.json"))
-        history.consider(text: "a", hasFile: false)
-        history.consider(text: "a", hasFile: false)
-        history.consider(text: "  ", hasFile: false)
-        history.consider(text: "file", hasFile: true)
-        history.consider(text: "b", hasFile: false)
+        history.consider(text: "a")
+        history.consider(text: "a")
+        history.consider(text: "  ")
+        history.consider(text: "file", types: [NSPasteboard.PasteboardType.fileURL.rawValue])
+        history.consider(text: "b")
         let texts = history.items.map(\.text)
         if texts != ["b", "a"] { fail("история \(texts)") }
         for index in 0..<55 {
-            history.consider(text: "n\(index)", hasFile: false)
+            history.consider(text: "n\(index)")
         }
         if history.items.count != 50 { fail("лимит \(history.items.count)") }
         if history.items.first?.text != "n54" { fail("порядок") }
