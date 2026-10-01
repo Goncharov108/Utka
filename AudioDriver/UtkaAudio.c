@@ -42,6 +42,9 @@ static os_unfair_lock gMixLock = OS_UNFAIR_LOCK_INIT;
 static AudioServerPlugInDriverInterface gInterface;
 static AudioServerPlugInDriverInterface *gInterfacePtr = &gInterface;
 
+/// Устройство видно в меню выходов: флаг из общей памяти. Без утки — спрятано.
+static int devicePublished(void);
+
 static Float32 bitsToFloat(uint32_t bits) {
     Float32 value = 0;
     memcpy(&value, &bits, sizeof(value));
@@ -186,6 +189,7 @@ static UInt32 collectOwned(AudioObjectID objectID, UInt32 qualSize, const void *
     AudioClassID classes[4];
     UInt32 total = 0;
     if (objectID == kAudioObjectPlugInObject) {
+        if (!devicePublished()) return 0;
         ids[0] = kDeviceID;
         classes[0] = kAudioDeviceClassID;
         total = 1;
@@ -241,6 +245,26 @@ static void notifyDevice(AudioObjectPropertySelector selector, AudioObjectProper
     if (gHost == NULL || gHost->PropertiesChanged == NULL) return;
     AudioObjectPropertyAddress address = { selector, scope, kAudioObjectPropertyElementMain };
     gHost->PropertiesChanged(gHost, kDeviceID, 1, &address);
+}
+
+/// Устройство видно в меню выходов: флаг из общей памяти. Без утки — спрятано.
+static int devicePublished(void) {
+    if (gRing == NULL) return 0;
+    return atomic_load_explicit(&gRing->published, memory_order_acquire) != 0;
+}
+
+/// Список устройств плагина и IsHidden — иначе меню macOS не обновится.
+static void notifyPublicationChanged(void) {
+    if (gHost == NULL || gHost->PropertiesChanged == NULL) return;
+    AudioObjectPropertyAddress pluginAddrs[2] = {
+        { kAudioPlugInPropertyDeviceList, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
+        { kAudioObjectPropertyOwnedObjects, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain }
+    };
+    gHost->PropertiesChanged(gHost, kAudioObjectPlugInObject, 2, pluginAddrs);
+    AudioObjectPropertyAddress hidden = {
+        kAudioDevicePropertyIsHidden, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain
+    };
+    gHost->PropertiesChanged(gHost, kDeviceID, 1, &hidden);
 }
 
 /// Ограничивает отсчёт диапазоном −1…1.
@@ -412,9 +436,10 @@ static Boolean Utka_HasProperty(AudioServerPlugInDriverRef inDriver, AudioObject
             case kAudioPlugInPropertyTranslateUIDToDevice:
             case kAudioPlugInPropertyBoxList:
             case kAudioPlugInPropertyClockDeviceList:
+            case kAudioObjectPropertyCustomPropertyInfoList:
                 return true;
             default:
-                return false;
+                return selector == (AudioObjectPropertySelector)UTKA_PUBLISH_SELECTOR;
         }
     }
     if (inObjectID == kDeviceID) {
@@ -501,6 +526,7 @@ static OSStatus Utka_IsPropertySettable(AudioServerPlugInDriverRef inDriver, Aud
     if (outIsSettable == NULL || inAddress == NULL) return kAudioHardwareIllegalOperationError;
     if (!Utka_HasProperty(inDriver, inObjectID, inClientProcessID, inAddress)) return kAudioHardwareUnknownPropertyError;
     Boolean settable = 0;
+    if (inObjectID == kAudioObjectPlugInObject && inAddress->mSelector == (AudioObjectPropertySelector)UTKA_PUBLISH_SELECTOR) settable = 1;
     if (inObjectID == kDeviceID && (isVolume(inAddress) || isMute(inAddress))) settable = 1;
     if (inObjectID == kVolumeID && (inAddress->mSelector == kAudioLevelControlPropertyScalarValue || inAddress->mSelector == kAudioLevelControlPropertyDecibelValue)) settable = 1;
     if (inObjectID == kMuteID && inAddress->mSelector == kAudioBooleanControlPropertyValue) settable = 1;
@@ -515,7 +541,14 @@ static UInt32 propertySize(AudioObjectID objectID, const AudioObjectPropertyAddr
     }
     if (selector == kAudioPlugInPropertyTranslateUIDToDevice) return sizeof(AudioObjectID);
     if (selector == kAudioPlugInPropertyDeviceList) {
-        return objectID == kAudioObjectPlugInObject ? (UInt32)sizeof(AudioObjectID) : 0;
+        if (objectID != kAudioObjectPlugInObject) return 0;
+        return devicePublished() ? (UInt32)sizeof(AudioObjectID) : 0;
+    }
+    if (selector == kAudioObjectPropertyCustomPropertyInfoList) {
+        return objectID == kAudioObjectPlugInObject ? (UInt32)sizeof(AudioServerPlugInCustomPropertyInfo) : 0;
+    }
+    if (selector == (AudioObjectPropertySelector)UTKA_PUBLISH_SELECTOR) {
+        return objectID == kAudioObjectPlugInObject ? stringSize() : 0;
     }
     if (selector == kAudioObjectPropertyOwnedObjects) {
         return collectOwned(objectID, qualSize, qual, NULL, 0) * (UInt32)sizeof(AudioObjectID);
@@ -561,7 +594,7 @@ static OSStatus Utka_GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioO
 
     if (inObjectID == kAudioObjectPlugInObject && selector == kAudioPlugInPropertyTranslateUIDToDevice) {
         AudioObjectID found = kAudioObjectUnknown;
-        if (inQualifierData != NULL && inQualifierDataSize >= sizeof(CFStringRef)) {
+        if (devicePublished() && inQualifierData != NULL && inQualifierDataSize >= sizeof(CFStringRef)) {
             CFStringRef uid = *(CFStringRef *)inQualifierData;
             if (uid != NULL && CFGetTypeID(uid) == CFStringGetTypeID()) {
                 CFStringRef ours = CFStringCreateWithCString(NULL, UTKA_DEVICE_UID, kCFStringEncodingUTF8);
@@ -572,6 +605,18 @@ static OSStatus Utka_GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioO
             }
         }
         return writeBytes(inDataSize, outDataSize, outData, &found, sizeof(found));
+    }
+
+    if (inObjectID == kAudioObjectPlugInObject && selector == kAudioObjectPropertyCustomPropertyInfoList) {
+        AudioServerPlugInCustomPropertyInfo info = {
+            (AudioObjectPropertySelector)UTKA_PUBLISH_SELECTOR,
+            kAudioServerPlugInCustomPropertyDataTypeCFString,
+            kAudioServerPlugInCustomPropertyDataTypeNone
+        };
+        return writeBytes(inDataSize, outDataSize, outData, &info, sizeof(info));
+    }
+    if (inObjectID == kAudioObjectPlugInObject && selector == (AudioObjectPropertySelector)UTKA_PUBLISH_SELECTOR) {
+        return writeString(inDataSize, outDataSize, outData, devicePublished() ? "1" : "0");
     }
 
     if (selector == kAudioObjectPropertyName) {
@@ -610,7 +655,7 @@ static OSStatus Utka_GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioO
         return writeBytes(inDataSize, outDataSize, outData, &value, sizeof(value));
     }
     if (selector == kAudioPlugInPropertyDeviceList) {
-        if (inObjectID != kAudioObjectPlugInObject) {
+        if (inObjectID != kAudioObjectPlugInObject || !devicePublished()) {
             if (outDataSize) *outDataSize = 0;
             return noErr;
         }
@@ -677,7 +722,8 @@ static OSStatus Utka_GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioO
         return writeBytes(inDataSize, outDataSize, outData, &value, sizeof(value));
     }
     if (selector == kAudioDevicePropertyDeviceIsAlive || selector == kAudioDevicePropertyIsHidden || selector == kAudioDevicePropertyClockIsStable) {
-        UInt32 value = selector == kAudioDevicePropertyIsHidden ? 0 : 1;
+        UInt32 value = 1;
+        if (selector == kAudioDevicePropertyIsHidden) value = devicePublished() ? 0 : 1;
         return writeBytes(inDataSize, outDataSize, outData, &value, sizeof(value));
     }
     if (selector == kAudioDevicePropertyDeviceIsRunning || selector == kAudioStreamPropertyIsActive) {
@@ -685,7 +731,8 @@ static OSStatus Utka_GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioO
         return writeBytes(inDataSize, outDataSize, outData, &value, sizeof(value));
     }
     if (selector == kAudioDevicePropertyDeviceCanBeDefaultDevice || selector == kAudioDevicePropertyDeviceCanBeDefaultSystemDevice) {
-        UInt32 value = inAddress->mScope == kAudioObjectPropertyScopeInput ? 0 : 1;
+        UInt32 value = 0;
+        if (devicePublished() && inAddress->mScope != kAudioObjectPropertyScopeInput) value = 1;
         return writeBytes(inDataSize, outDataSize, outData, &value, sizeof(value));
     }
     if (selector == kAudioDevicePropertyLatency || selector == kAudioDevicePropertySafetyOffset || selector == kAudioStreamPropertyLatency) {
@@ -764,6 +811,12 @@ static OSStatus Utka_GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioO
 static OSStatus Utka_SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 inDataSize, const void *inData) {
     (void)inDriver; (void)inClientProcessID; (void)inQualifierDataSize; (void)inQualifierData;
     if (inAddress == NULL || inData == NULL) return kAudioHardwareIllegalOperationError;
+    if (inObjectID == kAudioObjectPlugInObject && inAddress->mSelector == (AudioObjectPropertySelector)UTKA_PUBLISH_SELECTOR) {
+        if (inDataSize < sizeof(CFStringRef)) return kAudioHardwareBadPropertySizeError;
+        createRing();
+        notifyPublicationChanged();
+        return noErr;
+    }
     if (inObjectID == kVolumeID || (inObjectID == kDeviceID && isVolume(inAddress))) {
         if (inDataSize < sizeof(Float32)) return kAudioHardwareBadPropertySizeError;
         Float32 scalar = *(const Float32 *)inData;

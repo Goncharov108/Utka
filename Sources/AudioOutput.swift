@@ -48,8 +48,14 @@ final class AudioOutput {
         listen(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDevices, add: true)
         listen(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice, add: true)
         refreshFromHardware()
-        guard IslandBar.sound else { return }
-        if pluginPresent { requestListenAccess() }
+        guard IslandBar.sound else {
+            hideVirtualDevice()
+            return
+        }
+        publishVirtualDevice { [weak self] in
+            guard let self, self.pluginPresent else { return }
+            self.requestListenAccess()
+        }
     }
 
     /// Плагин «Утка звук» стоит в системной папке или его устройство уже видно.
@@ -128,6 +134,7 @@ final class AudioOutput {
         guard !didShutdown else { return }
         didShutdown = true
         endRoute()
+        hideVirtualDevice()
     }
 
     /// Выключает петлю «Утка звук» и возвращает системный выход на прежнее
@@ -145,16 +152,44 @@ final class AudioOutput {
         refreshFromHardware()
     }
 
-    /// Тумблер «Звук» из настроек: выключен — петля гасится и больше не
-    /// поднимается сама, включён — пробуем поднять её снова (если доступ
-    /// к «микрофону» уже дан; иначе дождёмся обычного запроса доступа).
+    /// Тумблер «Звук» из настроек: выключен — петля гасится, устройство
+    /// прячется из меню macOS; включён — сначала публикуем выход, потом
+    /// поднимаем маршрут (если доступ к «микрофону» уже дан).
     func setSoundEnabled(_ on: Bool) {
         guard on else {
             endRoute()
+            hideVirtualDevice()
             return
         }
         guard started else { return }
-        if pluginPresent { requestListenAccess() }
+        publishVirtualDevice { [weak self] in
+            guard let self, self.pluginPresent else { return }
+            self.requestListenAccess()
+        }
+    }
+
+    /// Прячет «Утка звук» из списка выходов macOS.
+    private func hideVirtualDevice() {
+        _ = UtkaPlaySetPublished(0)
+        virtualID = 0
+        refreshFromHardware()
+    }
+
+    /// Публикует устройство и дожидается, пока Core Audio его увидит.
+    private func publishVirtualDevice(then work: @escaping () -> Void) {
+        _ = UtkaPlaySetPublished(1)
+        waitForVirtualDevice(tries: 0, then: work)
+    }
+
+    /// Короткий опрос списка устройств после публикации.
+    private func waitForVirtualDevice(tries: Int, then work: @escaping () -> Void) {
+        if deviceID(forUID: virtualUID) != 0 || tries >= 25 {
+            work()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+            self?.waitForVirtualDevice(tries: tries + 1, then: work)
+        }
     }
 
     /// Физические колонки Мака — в обход «Утка звук», наушников, Bluetooth
