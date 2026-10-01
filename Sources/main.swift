@@ -29,6 +29,9 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settings.onShotDisposal = { [weak shelf] disposal in
             shelf?.setShotDisposal(disposal)
         }
+        settings.onClipboardPrefs = { [weak history] in
+            history?.applyPrefs()
+        }
         ShotEditor.shelf = shelf
         presets = PresetsModel(storeURL: support.appendingPathComponent("presets.json"))
 
