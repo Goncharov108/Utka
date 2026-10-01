@@ -95,6 +95,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/Resources/utka-mark.png" "$APP/Contents/Resources/utka-mark.png"
 cp "$ROOT/Resources/shot-mark.png" "$APP/Contents/Resources/shot-mark.png"
+cp "$ROOT/Resources/catalog.json" "$APP/Contents/Resources/catalog.json"
 write_icon "$ROOT/Resources/utka-mark.png" "$APP/Contents/Resources/Utka.icns"
 
 BIN_DIR="$(mktemp -d)"

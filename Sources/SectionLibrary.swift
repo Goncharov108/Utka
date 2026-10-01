@@ -31,15 +31,9 @@ enum SectionBoard {
     private static var catalogCache: [LibraryCard] = []
     private static var installedCache: [LibraryCard] = []
 
-    /// Каталог `utka-library` рядом с репозиторием Утки. Нет файла — библиотека пустая.
+    /// Каталог внутри приложения. Соседняя папка не нужна: обновление Утки привозит файл само.
     static func catalogURL() -> URL? {
-        let url = Bundle.main.bundleURL
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("utka-library")
-            .appendingPathComponent("catalog.json")
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return url
+        Bundle.main.url(forResource: "catalog", withExtension: "json")
     }
 
     /// Заново читает каталог. Снятые из каталога копии с Мака уходят.
