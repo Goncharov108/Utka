@@ -39,7 +39,7 @@ private enum SettingsPage: Int {
         case .sections: return "Разделы"
         case .sound: return "Звук"
         case .search: return "Поиск"
-        case .shot: return "Скрин"
+        case .shot: return "Полка"
         case .translate: return "Перевод"
         case .updates: return "Обновления"
         }
