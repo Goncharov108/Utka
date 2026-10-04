@@ -83,39 +83,38 @@ enum SoundPlugin {
     }
 
     /// Кладёт драйвер в HAL. Если он уже стоит — не удаляет и не перезаписывает.
+    /// Пути никогда не склеиваются в строку для оболочки: имена папок внутри
+    /// скачанного архива задаёт его автор, и кавычка в таком имени иначе
+    /// превратилась бы в команду, выполненную с правами администратора.
     private static func copyDriver(_ bundle: URL) -> String? {
         let dest = (hal as NSString).appendingPathComponent(driverName)
         if FileManager.default.fileExists(atPath: dest) { return nil }
-        let script = "mkdir -p '\(hal)' && cp -R '\(bundle.path)' '\(dest)'"
         if FileManager.default.isWritableFile(atPath: hal) {
-            return runScript(script)
+            do {
+                try FileManager.default.createDirectory(atPath: hal, withIntermediateDirectories: true)
+                try FileManager.default.copyItem(atPath: bundle.path, toPath: dest)
+                return nil
+            } catch {
+                return "Не удалось поставить плагин"
+            }
         }
-        return copyWithPassword(script)
+        return copyWithPassword(from: bundle.path, to: dest)
     }
 
-    /// Запускает команду. nil — вышла без ошибки.
-    private static func runScript(_ script: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-c", script]
-        do {
-            try process.run()
-        } catch {
-            return "Не удалось поставить плагин"
-        }
-        process.waitUntilExit()
-        return process.terminationStatus == 0 ? nil : "Не удалось поставить плагин"
-    }
-
-    /// Тот же запрос пароля, что раньше был у сборки.
-    private static func copyWithPassword(_ script: String) -> String? {
-        let escaped = script.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    /// Запрос пароля системы. Пути уходят отдельными аргументами, а в AppleScript
+    /// экранируются через `quoted form of`, не через ручную подстановку.
+    private static func copyWithPassword(from source: String, to dest: String) -> String? {
+        let script = [
+            "on run argv",
+            "set hal to quoted form of (item 1 of argv)",
+            "set src to quoted form of (item 2 of argv)",
+            "set dst to quoted form of (item 3 of argv)",
+            "do shell script \"/bin/mkdir -p \" & hal & \" && /bin/cp -R \" & src & \" \" & dst with prompt \"Утке нужно поставить выход звука в системную папку.\" with administrator privileges",
+            "end run"
+        ]
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = [
-            "-e",
-            "do shell script \"\(escaped)\" with prompt \"Утке нужно поставить выход звука в системную папку.\" with administrator privileges"
-        ]
+        process.arguments = script.flatMap { ["-e", $0] } + ["--", hal, source, dest]
         do {
             try process.run()
         } catch {

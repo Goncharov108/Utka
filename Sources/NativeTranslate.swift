@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 
 /// Свой офлайн-переводчик en↔ru: не Apple, не Google, не какой-либо
 /// сторонний сервис. Движок и модели — из отдельного репозитория
@@ -81,6 +82,16 @@ enum NativeTranslate {
             do {
                 try? FileManager.default.removeItem(at: zipPath)
                 try FileManager.default.moveItem(at: location, to: zipPath)
+                // Внутри архива исполняемый файл, поэтому сначала сверяем отпечаток
+                // с тем, что мы сами опубликовали. Подмена файла на сервере или по
+                // дороге не пройдёт: чужое не распаковывается и не запускается.
+                guard let actual = sha256(of: zipPath), actual == expectedSHA256 else {
+                    try? FileManager.default.removeItem(at: zipPath)
+                    DispatchQueue.main.async {
+                        completion("Скачанный файл не совпал с ожидаемым — установка отменена. Если вы только что обновляли движок, обновите и Утку")
+                    }
+                    return
+                }
                 try unzip(zipPath, into: root)
                 try? FileManager.default.removeItem(at: zipPath)
                 let ready = isInstalled
@@ -90,6 +101,21 @@ enum NativeTranslate {
             }
         }
         task.resume()
+    }
+
+    /// SHA-256 архива из релиза v0.1.0-runtime-macos-arm64. Меняется вместе со ссылкой выше:
+    /// выпустили новый релиз — пересчитайте `shasum -a 256` и обновите оба значения.
+    private static let expectedSHA256 = "622a640cd30632ae5b8b7f1bad1a9e78ceab11f65b007edbfc3c4be16e3263c1"
+
+    /// Отпечаток файла по кускам: архив 144 МБ целиком в память не читаем.
+    private static func sha256(of file: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private static func unzip(_ zip: URL, into dir: URL) throws {
