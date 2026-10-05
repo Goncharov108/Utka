@@ -111,6 +111,16 @@ final class PresetsModel {
 
     /// Будильник у заметки. nil — снять. Смена даты сбрасывает «уже открывали».
     /// При выключенном крякере новые даты не ставятся; старые dueAt в файле не трогаем.
+    /// Правка текста заметки. Будильник, порядок и место в списке не трогает.
+    func updateText(id: String, title: String, body: String) {
+        guard let index = items.firstIndex(where: { $0.id == id && $0.kind == "text" }) else { return }
+        guard items[index].title != title || items[index].body != body else { return }
+        items[index].title = title
+        items[index].body = body
+        save()
+        onChange?()
+    }
+
     func setAlarm(id: String, date: Date?) {
         guard QuackerPrefs.enabled || date == nil else { return }
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
@@ -390,7 +400,7 @@ final class PresetsView: NSView {
     }
 
     private func rebuild() {
-        guard noteStrip.drag == nil, !fileGrid.isDragging else {
+        guard noteStrip.drag == nil, !fileGrid.isDragging, !rows.contains(where: \.isEditing) else {
             rebuildPending = true
             return
         }
@@ -425,6 +435,11 @@ final class PresetsView: NSView {
                 ringing: preset.id == self.ringingID
             )
             row.onAlarmPicked = { [weak self] date in self?.model.setAlarm(id: preset.id, date: date) }
+            row.onEdited = { [weak self] title, body in
+                let name = title.isEmpty ? oneLine(body, limit: 32) : title
+                self?.model.updateText(id: preset.id, title: name, body: body)
+            }
+            row.onEditEnded = { [weak self] in self?.rebuildIfPending() }
             row.onClick = { [weak self] in
                 guard let self else { return }
                 if preset.id == self.ringingID { self.onAlarmOpened?(preset.id) }

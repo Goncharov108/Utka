@@ -613,9 +613,13 @@ final class TextRowView: NSView {
     var onReorderDrag: ((CGFloat) -> Void)?
     var onReorderDrop: (() -> Void)?
     var onCopySelection: ((String) -> Void)?
-    var onSelecting: ((Bool) -> Void)? {
-        didSet { textView.onSelecting = onSelecting }
-    }
+    var onSelecting: ((Bool) -> Void)?
+    /// Сохранили правку: название и текст уже без пробелов по краям.
+    var onEdited: ((String, String) -> Void)? { didSet { applyEditVisibility() } }
+    /// Правку закончили, сохранением или отменой.
+    var onEditEnded: (() -> Void)?
+    /// Идёт правка. Пока она идёт, список заметок не пересобирается.
+    var isEditing: Bool { editing }
     var isExpanded = false {
         didSet {
             guard isExpanded != oldValue else { return }
@@ -639,6 +643,13 @@ final class TextRowView: NSView {
     private var reorderGrab: CGFloat = 0
     private var pressPoint = NSPoint.zero
     private let collapseButton = NSButton()
+    private let editButton = NSButton()
+    private let saveButton = NSButton()
+    private let cancelButton = NSButton()
+    private let titleField = NSTextField()
+    private var editing = false
+    private var shownTitle = ""
+    private var shownBody = ""
     private let textScroll = NSScrollView()
     private let textView = SelectableTextView()
 
@@ -668,6 +679,21 @@ final class TextRowView: NSView {
         collapseButton.controlSize = .small
         collapseButton.target = self
         collapseButton.action = #selector(toggleTapped)
+        styleFooter(editButton, title: "Изменить", symbol: "pencil", action: #selector(editTapped))
+        styleFooter(saveButton, title: "Сохранить", symbol: "checkmark", action: #selector(saveEditTapped))
+        styleFooter(cancelButton, title: "Отмена", symbol: nil, action: #selector(cancelEditTapped))
+        titleField.font = UtkaChrome.font(13, weight: .semibold)
+        titleField.placeholderString = "Название"
+        titleField.isBordered = false
+        titleField.focusRingType = .none
+        titleField.bezelStyle = .roundedBezel
+        titleField.isHidden = true
+        // Выделение мышью держит островок открытым; во время правки его не отпускаем.
+        textView.onSelecting = { [weak self] on in
+            guard let self else { return }
+            if self.editing, !on { return }
+            self.onSelecting?(on)
+        }
         textView.isEditable = false
         textView.isSelectable = true
         textView.drawsBackground = false
@@ -693,6 +719,10 @@ final class TextRowView: NSView {
         addSubview(textScroll)
         addSubview(selectionButton)
         addSubview(collapseButton)
+        addSubview(editButton)
+        addSubview(saveButton)
+        addSubview(cancelButton)
+        addSubview(titleField)
         NotificationCenter.default.addObserver(self, selector: #selector(retintRow), name: IslandLook.changed, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(quackerChanged), name: QuackerPrefs.changed, object: nil)
         updateExpanded()
@@ -732,6 +762,8 @@ final class TextRowView: NSView {
     /// ringing — срок уже наступил и заметку ещё не открывали: подсвечивает строку.
     func show(title: String, detail: String, body: String = "", dueAt: Date? = nil, ringing: Bool = false) {
         titleLabel.stringValue = title
+        shownTitle = title
+        shownBody = body
         hasAlarm = dueAt != nil
         alarmRinging = ringing
         currentDueAt = dueAt
@@ -775,6 +807,7 @@ final class TextRowView: NSView {
         collapseButton.isHidden = !isExpanded
         expandButton.contentTintColor = isExpanded ? UtkaChrome.ink : UtkaChrome.dim
         detailLabel.isHidden = isExpanded || detailLabel.stringValue.isEmpty || detailLabel.stringValue == titleLabel.stringValue
+        applyEditVisibility()
         needsLayout = true
     }
 
@@ -815,6 +848,10 @@ final class TextRowView: NSView {
             selectionButton.frame = NSRect(x: 10, y: 6, width: 150, height: 22)
             collapseButton.frame = NSRect(x: bounds.width - 100, y: 6, width: 90, height: 22)
             textScroll.frame = NSRect(x: 8, y: 34, width: bounds.width - 16, height: max(20, top - 38))
+            editButton.frame = NSRect(x: 168, y: 6, width: 96, height: 22)
+            saveButton.frame = NSRect(x: 10, y: 6, width: 112, height: 22)
+            cancelButton.frame = NSRect(x: 130, y: 6, width: 90, height: 22)
+            titleField.frame = NSRect(x: 8, y: top + (head - 24) / 2, width: max(60, textW), height: 24)
         }
     }
 
@@ -889,7 +926,97 @@ final class TextRowView: NSView {
     }
 
     @objc private func toggleTapped() {
+        guard !editing else { return }
         onToggle?()
+    }
+
+    private func styleFooter(_ button: NSButton, title: String, symbol: String?, action: Selector) {
+        button.title = title
+        if let symbol {
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+            button.imagePosition = .imageLeading
+        }
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.target = self
+        button.action = action
+    }
+
+    /// Какие кнопки внизу и вверху видны сейчас: обычные или «Сохранить»/«Отмена».
+    private func applyEditVisibility() {
+        let normal = isExpanded && !editing
+        selectionButton.isHidden = !normal
+        collapseButton.isHidden = !normal
+        // «Изменить» только там, где правку принимают (заметки), не в буфере.
+        editButton.isHidden = !normal || onEdited == nil
+        saveButton.isHidden = !(isExpanded && editing)
+        cancelButton.isHidden = !(isExpanded && editing)
+        titleField.isHidden = !(isExpanded && editing)
+        titleLabel.isHidden = isExpanded && editing
+        // Пока правят, строку нельзя ни свернуть, ни удалить, ни переставить:
+        // список в это время не пересобирается и правка не должна потеряться.
+        for button in [deleteButton, copyButton, expandButton, alarmButton] {
+            button.isEnabled = !editing
+            button.alphaValue = editing ? 0.35 : 1
+        }
+    }
+
+    @objc private func editTapped() {
+        guard isExpanded, !editing else { return }
+        editing = true
+        titleField.stringValue = shownTitle
+        titleField.textColor = UtkaChrome.ink
+        // Видимая подложка: иначе не понять, что поля стали редактируемыми.
+        let tint = UtkaChrome.ink.withAlphaComponent(0.16)
+        titleField.backgroundColor = tint
+        titleField.drawsBackground = true
+        textScroll.wantsLayer = true
+        textScroll.layer?.backgroundColor = tint.cgColor
+        textScroll.layer?.cornerRadius = 6
+        textView.isEditable = true
+        textView.string = shownBody
+        applyEditVisibility()
+        needsLayout = true
+        onSelecting?(true)
+        window?.makeFirstResponder(textView)
+        textView.setSelectedRange(NSRange(location: (shownBody as NSString).length, length: 0))
+    }
+
+    @objc private func saveEditTapped() {
+        guard editing else { return }
+        let body = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Пустую заметку не сохраняем: проще оставить как была, чем потерять текст.
+        guard !body.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        let title = titleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        finishEditing()
+        onEdited?(title, body)
+        onEditEnded?()
+    }
+
+    @objc private func cancelEditTapped() {
+        guard editing else { return }
+        textView.string = shownBody
+        titleField.stringValue = shownTitle
+        finishEditing()
+        onEditEnded?()
+    }
+
+    private func finishEditing() {
+        editing = false
+        textScroll.layer?.backgroundColor = nil
+        textView.isEditable = false
+        window?.makeFirstResponder(nil)
+        applyEditVisibility()
+        needsLayout = true
+        onSelecting?(false)
+    }
+
+    deinit {
+        // Строку пересобрали, пока её правили: островок больше не держим.
+        if editing { onSelecting?(false) }
     }
 
     @objc private func alarmTapped() {
