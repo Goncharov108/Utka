@@ -111,11 +111,23 @@ func alarmLabel(_ date: Date) -> String {
 /// Календарь и часы в одном узком виджете (.clockAndCalendar с обоими
 /// элементами) не помещались — пропадала шапка с месяцем и подсветка
 /// сегодняшнего дня. Снизу одна строка: часы, минуты и плюс.
-final class AlarmPopover: NSObject, NSPopoverDelegate {
+/// Поле часов/минут: при входе выделяет всё (новая цифра заменяет старые),
+/// принимает только две цифры.
+private final class ClockField: NSTextField {
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        if ok { DispatchQueue.main.async { [weak self] in self?.currentEditor()?.selectAll(nil) } }
+        return ok
+    }
+}
+
+final class AlarmPopover: NSObject, NSPopoverDelegate, NSTextFieldDelegate {
     private let popover = NSPopover()
     private let calendarPicker = NSDatePicker()
-    private let hourField = NSTextField()
-    private let minuteField = NSTextField()
+    private let hourField = ClockField()
+    private let minuteField = ClockField()
+    private let hourStepper = NSStepper()
+    private let minuteStepper = NSStepper()
     private var fallbackHour = 0
     private var fallbackMinute = 0
     private var onPick: ((Date?) -> Void)?
@@ -142,13 +154,18 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
         let rowH: CGFloat = 26
         // Сетка дней не растягивается: строка времени ровно по её ширине.
         let calSize = calendarPicker.fittingSize
-        let contentW = ceil(calSize.width)
+        // Строка времени (цифры, стрелки, «снять», плюс) не должна быть уже самой себя.
+        let font = UtkaChrome.font(13, weight: .medium)
+        let clearW = canClear ? ceil(("снять" as NSString).size(withAttributes: [.font: font]).width) + 16 : 0
+        let colonEstimate: CGFloat = 12
+        let rowNeeded = clockDigitWidth() * 2 + colonEstimate + 6 + 14 + 4 + 14 + 10 + clearW + 10 + rowH
+        let contentW = max(ceil(calSize.width), ceil(rowNeeded))
         let width = contentW + pad * 2
         let height = pad + calSize.height + gap + rowH + pad
 
         let root = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         let calendarY = height - pad - calSize.height
-        calendarPicker.frame = NSRect(x: pad, y: calendarY, width: contentW, height: calSize.height)
+        calendarPicker.frame = NSRect(x: pad + (contentW - calSize.width) / 2, y: calendarY, width: calSize.width, height: calSize.height)
         root.addSubview(calendarPicker)
         placeClockRow(in: root, x: pad, y: pad, width: contentW, height: rowH, canClear: canClear)
 
@@ -184,6 +201,12 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
 
     /// Две цифры без рамки и без синей подсветки системного пикера.
     private func styleClock(_ field: NSTextField, _ value: Int) {
+        field.delegate = self
+        // Одна строка без переноса: иначе вторая цифра уезжает под первую.
+        field.cell?.wraps = false
+        field.cell?.isScrollable = true
+        field.usesSingleLineMode = true
+        field.lineBreakMode = .byClipping
         field.isEditable = true
         field.isSelectable = true
         field.isBordered = false
@@ -212,6 +235,16 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
         root.addSubview(colon)
         root.addSubview(minuteField)
 
+        // Стрелки вверх/вниз у каждого поля, как в системном выборе времени.
+        configure(hourStepper, field: hourField, max: 23)
+        configure(minuteStepper, field: minuteField, max: 59)
+        let stepW: CGFloat = 14
+        let stepH: CGFloat = 22
+        hourStepper.frame = NSRect(x: minuteField.frame.maxX + 6, y: y + (height - stepH) / 2, width: stepW, height: stepH)
+        minuteStepper.frame = NSRect(x: hourStepper.frame.maxX + 4, y: y + (height - stepH) / 2, width: stepW, height: stepH)
+        root.addSubview(hourStepper)
+        root.addSubview(minuteStepper)
+
         let plus = makePlusButton()
         plus.frame = NSRect(x: x + width - height, y: y, width: height, height: height)
         root.addSubview(plus)
@@ -228,11 +261,26 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
         root.addSubview(clear)
     }
 
+    private func configure(_ stepper: NSStepper, field: NSTextField, max: Int) {
+        stepper.minValue = 0
+        stepper.maxValue = Double(max)
+        stepper.increment = 1
+        stepper.valueWraps = true
+        stepper.integerValue = Int(field.stringValue) ?? 0
+        stepper.target = self
+        stepper.action = #selector(stepperChanged(_:))
+    }
+
+    @objc private func stepperChanged(_ sender: NSStepper) {
+        let field = sender === hourStepper ? hourField : minuteField
+        field.stringValue = String(format: "%02d", sender.integerValue)
+    }
+
     /// Ширина двух цифр текущим шрифтом часов.
     private func clockDigitWidth() -> CGFloat {
         let font = hourField.font ?? UtkaChrome.font(17, weight: .medium)
         let measured = ("00" as NSString).size(withAttributes: [.font: font]).width
-        return ceil(measured) + 6
+        return ceil(measured) + 14
     }
 
     /// Плюс, как у новой заметки. Он и ставит будильник.
@@ -265,6 +313,23 @@ final class AlarmPopover: NSObject, NSPopoverDelegate {
         )
         button.attributedTitle = title
         return button
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField else { return }
+        let digits = field.stringValue.filter { $0.isASCII && $0.isNumber }
+        let trimmed = String(digits.suffix(2))
+        if trimmed != field.stringValue { field.stringValue = trimmed }
+        if let value = Int(trimmed) {
+            (field === hourField ? hourStepper : minuteStepper).integerValue = value
+        }
+    }
+
+    /// Return в поле времени ставит будильник.
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard selector == #selector(NSResponder.insertNewline(_:)) else { return false }
+        setTapped()
+        return true
     }
 
     func popoverDidClose(_ notification: Notification) {

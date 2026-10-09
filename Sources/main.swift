@@ -80,6 +80,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard event.keyCode == 53, self?.panel.window.isKeyWindow == true else { return event }
             self?.panel.hide()
+            self?.hover.markClosed()
             return nil
         }
     }
@@ -151,6 +152,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let screen else { return }
         setEnabled(true)
         panel.show(on: screen)
+        hover.markOpened(on: screen)
         panel.select(slotID: IslandSection.presets.slotID)
         presetsView.openNote(id: id)
         reminder.acknowledge(id: id)
@@ -162,6 +164,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let screen else { return }
         setEnabled(true)
         panel.show(on: screen)
+        hover.markOpened(on: screen)
     }
 
     @objc private func toggleEnabled() {
