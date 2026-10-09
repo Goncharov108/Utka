@@ -13,6 +13,8 @@ final class HoverMonitor {
     private var outsideSince: Date?
     private var open = false
     private var activeFrame: CGRect?
+    /// Окно открыли не наведением (меню, будильник): не закрываем, пока курсор в него не заходил.
+    private var awaitingEntry = false
 
     /// Только верхняя кромка по центру. Тело островка сюда не входит: иначе утка выезжает, когда курсор просто проходит мимо.
     static func zone(for screen: NSScreen) -> CGRect {
@@ -29,6 +31,17 @@ final class HoverMonitor {
         insideSince = nil
         outsideSince = nil
         activeFrame = nil
+        awaitingEntry = false
+    }
+
+    /// Окно показано не от наведения. Дальше оно закрывается само, как обычное:
+    /// сразу после ухода курсора, но только если курсор в него хоть раз заходил.
+    func markOpened(on screen: NSScreen) {
+        open = true
+        insideSince = nil
+        outsideSince = nil
+        activeFrame = screen.frame
+        awaitingEntry = true
     }
 
     func start() {
@@ -77,9 +90,14 @@ final class HoverMonitor {
         insideSince = nil
         if let extra = extraHitRect(), extra.contains(point), open {
             outsideSince = nil
+            awaitingEntry = false
             return
         }
         guard open else {
+            outsideSince = nil
+            return
+        }
+        if awaitingEntry {
             outsideSince = nil
             return
         }
