@@ -1,6 +1,6 @@
 import AppKit
 
-/// Сверка номера с общим main utka-apps, установка и возврат предыдущей утки.
+/// Сверка номера с main Goncharov108/Utka, установка и возврат предыдущей утки.
 enum AppUpdate {
     struct Report {
         var text: String
@@ -11,16 +11,16 @@ enum AppUpdate {
         var isUpToDate: Bool = false
     }
 
-    /// Номер с общего main и текст, что лежит в этом обновлении.
+    /// Номер с main и текст, что лежит в этом обновлении.
     static func look() -> Report {
         guard let repo = repoRoot() else {
             return Report(text: "Рядом с приложением нет папки с кодом", canInstall: false)
         }
         guard let remote = sharedRemote(in: repo) else {
-            return Report(text: "Нет общего репозитория utka-apps", canInstall: false)
+            return Report(text: "Нет репозитория Goncharov108/Utka", canInstall: false)
         }
         guard fetchMain(repo, remote) else {
-            return Report(text: "Не удалось свериться с общим main", canInstall: false)
+            return Report(text: "Не удалось свериться с main", canInstall: false)
         }
         let shown = git(repo, ["show", "\(remote)/main:VERSION"])
         guard shown.code == 0, let remoteNote = parseVersionFile(shown.out) else {
@@ -43,22 +43,22 @@ enum AppUpdate {
         }
         var lines = ["Сейчас \(currentLabel)", "Новая \(withVee(remoteNote.version))"]
         if remoteNote.note.isEmpty {
-            lines.append("Описания этого обновления на общем main нет")
+            lines.append("Описания этого обновления на main нет")
         } else {
             lines.append(remoteNote.note)
         }
         return Report(text: lines.joined(separator: "\n"), canInstall: true)
     }
 
-    /// Кладёт общий main в текущую ветку. nil — можно собирать. Текст — почему нельзя.
+    /// Кладёт main в текущую ветку. nil — можно собирать. Текст — почему нельзя.
     static func prepareInstall() -> String? {
         guard let repo = repoRoot() else { return "Рядом с приложением нет папки с кодом" }
-        guard let remote = sharedRemote(in: repo) else { return "Нет общего репозитория utka-apps" }
+        guard let remote = sharedRemote(in: repo) else { return "Нет репозитория Goncharov108/Utka" }
         if let error = discardStrayVersionFile(repo) {
             return error
         }
         guard fetchMain(repo, remote) else {
-            return "Не удалось забрать общий main"
+            return "Не удалось забрать main"
         }
         dropAutomaticVersionCommits(repo, remote: remote)
         if git(repo, ["merge", "--ff-only", "\(remote)/main"]).code == 0 {
@@ -68,7 +68,7 @@ enum AppUpdate {
             return nil
         }
         _ = git(repo, ["merge", "--abort"])
-        return "Общий main не лёг поверх текущей ветки"
+        return "main не лёг поверх текущей ветки"
     }
 
     /// Если в папке изменён только номер, возвращает файл как в последнем сохранении.
@@ -88,7 +88,7 @@ enum AppUpdate {
         return nil
     }
 
-    /// Снимает с кончика ветки сохранения «Версия 1.0.5», которых нет на общем main.
+    /// Снимает с кончика ветки сохранения «Версия 1.0.5», которых нет на main.
     /// Такие пишет старая локальная сборка. Чужие правки не трогает.
     private static func dropAutomaticVersionCommits(_ repo: URL, remote: String) {
         let listed = git(repo, ["rev-list", "--first-parent", "\(remote)/main..HEAD"])
@@ -302,19 +302,19 @@ enum AppUpdate {
         return URL(fileURLWithPath: path)
     }
 
-    /// Удалённый utka-apps/utka, не личная копия.
+    /// Удалённый Goncharov108/Utka. Отсюда приложение берёт номер и код обновления.
     private static func sharedRemote(in repo: URL) -> String? {
         let listed = git(repo, ["remote", "-v"])
         guard listed.code == 0 else { return nil }
         var names: [String] = []
         for line in listed.out.split(separator: "\n") {
             let parts = line.split(separator: "\t", maxSplits: 1).map(String.init)
-            guard parts.count == 2, parts[1].contains("utka-apps/utka") else { continue }
+            guard parts.count == 2, parts[1].lowercased().contains("goncharov108/utka") else { continue }
             if !names.contains(parts[0]) {
                 names.append(parts[0])
             }
         }
-        if names.contains("utka-apps") { return "utka-apps" }
+        if names.contains("origin") { return "origin" }
         return names.first
     }
 

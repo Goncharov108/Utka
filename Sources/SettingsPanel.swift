@@ -788,7 +788,7 @@ final class SettingsPanel: NSObject {
         return text.hasPrefix("v") ? text : "v\(text)"
     }
 
-    /// Сверяет сборку с общим main и показывает, что именно готово.
+    /// Сверяет сборку с main и показывает, что именно готово.
     @objc private func checkUpdates() {
         guard !checking, !installing, !restoring else { return }
         checking = true
@@ -797,7 +797,7 @@ final class SettingsPanel: NSObject {
         updateButton.isEnabled = false
         restoreButton.isEnabled = false
         updateLine.textColor = UtkaChrome.dim
-        updateLine.stringValue = "Проверяю общий main…"
+        updateLine.stringValue = "Проверяю main…"
         applyPageVisibility()
         body.needsLayout = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
