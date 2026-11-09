@@ -25,13 +25,75 @@ if [ "$major" -lt 13 ] || { [ "$major" -eq 13 ] && [ "$minor" -lt 3 ]; }; then
   exit 1
 fi
 
-# Чёрный квадрат с уткой во всех размерах, которые ждёт Finder.
+# Иконка в Программах: та же утка, углы как у остальных программ.
+# Исходный знак без альфы — чёрный квадрат до края, Launchpad его не скругляет.
+round_icon() {
+  local src="$1"
+  local dest="$2"
+  local dir tool
+  dir="$(mktemp -d)"
+  tool="$dir/round-icon"
+  cat > "$dir/round-icon.swift" << 'EOF'
+import AppKit
+
+let srcPath = CommandLine.arguments[1]
+let dstPath = CommandLine.arguments[2]
+guard let image = NSImage(contentsOf: URL(fileURLWithPath: srcPath)) else {
+    fputs("нет иконки\n", stderr)
+    exit(1)
+}
+let side = 1024
+guard let rep = NSBitmapImageRep(
+    bitmapDataPlanes: nil,
+    pixelsWide: side,
+    pixelsHigh: side,
+    bitsPerSample: 8,
+    samplesPerPixel: 4,
+    hasAlpha: true,
+    isPlanar: false,
+    colorSpaceName: .deviceRGB,
+    bytesPerRow: 0,
+    bitsPerPixel: 0
+) else {
+    fputs("нет холста\n", stderr)
+    exit(1)
+}
+rep.size = NSSize(width: CGFloat(side), height: CGFloat(side))
+NSGraphicsContext.saveGraphicsState()
+NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+let rect = NSRect(x: 0, y: 0, width: CGFloat(side), height: CGFloat(side))
+NSColor.clear.set()
+rect.fill()
+let radius = CGFloat(side) * 0.2237
+NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).addClip()
+image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+NSGraphicsContext.restoreGraphicsState()
+guard let png = rep.representation(using: .png, properties: [:]) else {
+    fputs("нет png\n", stderr)
+    exit(1)
+}
+do {
+    try png.write(to: URL(fileURLWithPath: dstPath))
+} catch {
+    fputs("не записал иконку\n", stderr)
+    exit(1)
+}
+EOF
+  swiftc -O -o "$tool" "$dir/round-icon.swift"
+  "$tool" "$src" "$dest"
+  rm -rf "$dir"
+}
+
+# Утка со скруглёнными углами во всех размерах, которые ждёт Finder.
 write_icon() {
   local src="$1"
   local dest="$2"
-  local set
-  set="$(mktemp -d)/Utka.iconset"
+  local work rounded set
+  work="$(mktemp -d)"
+  rounded="$work/rounded.png"
+  set="$work/Utka.iconset"
   mkdir -p "$set"
+  round_icon "$src" "$rounded"
   local spec px name
   for spec in \
     "16:icon_16x16.png" \
@@ -47,10 +109,10 @@ write_icon() {
   do
     px="${spec%%:*}"
     name="${spec#*:}"
-    sips -z "$px" "$px" "$src" --out "$set/$name" >/dev/null
+    sips -z "$px" "$px" "$rounded" --out "$set/$name" >/dev/null
   done
   iconutil -c icns "$set" -o "$dest"
-  rm -rf "$(dirname "$set")"
+  rm -rf "$work"
 }
 # Шаг полоски только у кнопки «Установить». Обычная сборка эти строки не пишет.
 utka_step() {
