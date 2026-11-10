@@ -159,13 +159,13 @@ enum PulseReader {
         return min(1, max(0, heavy / total))
     }
 
-    /// Нагрев по ProcessInfo.thermalState.
+    /// Нагрев по ProcessInfo.thermalState. Градусов °C открытый API не даёт — только уровень.
     private static func heatGauge() -> (title: String, share: Double) {
         switch ProcessInfo.processInfo.thermalState {
-        case .nominal: return ("Норма", 0.12)
+        case .nominal: return ("Ок", 0.12)
         case .fair: return ("Тепло", 0.4)
         case .serious: return ("Жарко", 0.72)
-        case .critical: return ("Критично", 1)
+        case .critical: return ("Пик", 1)
         @unknown default: return ("—", 0)
         }
     }
@@ -510,16 +510,16 @@ enum PulseReader {
     }
 }
 
-/// Тело раздела «Пульс» на островке.
+/// Тело раздела «Пульс» на островке: виновник, красивые кольца, детализация в попапе.
 final class PulseIslandView: NSView {
-    private let headline = UtkaChrome.label("Считаю…", size: 14, weight: .medium)
+    private let headline = UtkaChrome.label("Считаю…", size: 15, weight: .semibold)
     private let gauges = PulseGaugesView()
-    private let list = FlippedView()
-    private var rows: [PulseAppRow] = []
+    private let detailsButton = NSButton()
     private var timer: Timer?
     private var lookObserver: NSObjectProtocol?
     private var windowObserver: NSObjectProtocol? = nil
     private var quitPrompt: PulseQuitPrompt?
+    private var detailsPanel: PulseDetailsPanel?
     private var lastApps: [PulseApp] = []
 
     override init(frame frameRect: NSRect) {
@@ -528,15 +528,15 @@ final class PulseIslandView: NSView {
         headline.maximumNumberOfLines = 2
         headline.cell?.wraps = true
         headline.cell?.truncatesLastVisibleLine = true
+        detailsButton.title = "Детализация"
+        detailsButton.bezelStyle = .rounded
+        detailsButton.controlSize = .regular
+        detailsButton.font = UtkaChrome.font(13, weight: .medium)
+        detailsButton.target = self
+        detailsButton.action = #selector(openDetails)
         addSubview(headline)
         addSubview(gauges)
-        addSubview(list)
-        for _ in 0..<5 {
-            let row = PulseAppRow()
-            row.onQuit = { [weak self] key in self?.askQuit(key) }
-            list.addSubview(row)
-            rows.append(row)
-        }
+        addSubview(detailsButton)
         applyLook()
         lookObserver = NotificationCenter.default.addObserver(
             forName: IslandLook.changed,
@@ -551,6 +551,7 @@ final class PulseIslandView: NSView {
 
     deinit {
         stopSampling()
+        detailsPanel?.close()
         if let lookObserver {
             NotificationCenter.default.removeObserver(lookObserver)
         }
@@ -562,9 +563,11 @@ final class PulseIslandView: NSView {
     /// Цвета под тему островка.
     func applyLook() {
         headline.textColor = UtkaChrome.ink
-        headline.font = UtkaChrome.font(14, weight: .medium)
+        headline.font = UtkaChrome.font(15, weight: .semibold)
         gauges.applyLook()
-        rows.forEach { $0.applyLook() }
+        detailsButton.font = UtkaChrome.font(13, weight: .medium)
+        detailsButton.appearance = IslandLook.appearance
+        detailsPanel?.applyLook()
     }
 
     /// Включает опрос, когда раздел на экране.
@@ -572,6 +575,8 @@ final class PulseIslandView: NSView {
         if on {
             startSampling()
         } else {
+            detailsPanel?.close()
+            detailsPanel = nil
             stopSampling()
         }
     }
@@ -609,20 +614,27 @@ final class PulseIslandView: NSView {
         layoutPulse()
     }
 
-    /// Верх — виновник, середина — спидометры, низ — пять строк.
+    /// Верх — виновник, центр — крупные кольца, низ — кнопка детализации.
     private func layoutPulse() {
-        let pad: CGFloat = 8
+        let pad: CGFloat = 10
         let width = max(40, bounds.width - pad * 2)
-        let headH: CGFloat = 36
-        headline.frame = NSRect(x: pad, y: bounds.height - headH - 2, width: width, height: headH)
-        let gaugeH: CGFloat = 78
-        gauges.frame = NSRect(x: pad, y: headline.frame.minY - gaugeH - 4, width: width, height: gaugeH)
-        let listTop = gauges.frame.minY - 6
-        list.frame = NSRect(x: pad, y: 0, width: width, height: max(0, listTop))
-        let rowH: CGFloat = min(32, list.bounds.height / 5)
-        for (index, row) in rows.enumerated() {
-            row.frame = NSRect(x: 0, y: CGFloat(index) * rowH, width: list.bounds.width, height: rowH)
-        }
+        let headH: CGFloat = 38
+        let buttonH: CGFloat = 28
+        headline.frame = NSRect(x: pad, y: bounds.height - headH - 4, width: width, height: headH)
+        detailsButton.frame = NSRect(
+            x: pad,
+            y: 6,
+            width: min(140, width),
+            height: buttonH
+        )
+        let gaugeTop = headline.frame.minY - 6
+        let gaugeBottom = detailsButton.frame.maxY + 8
+        gauges.frame = NSRect(
+            x: pad,
+            y: gaugeBottom,
+            width: width,
+            height: max(90, gaugeTop - gaugeBottom)
+        )
     }
 
     /// Опрос только пока раздел открыт и островок виден.
@@ -631,6 +643,8 @@ final class PulseIslandView: NSView {
         if visible {
             startSampling()
         } else {
+            detailsPanel?.close()
+            detailsPanel = nil
             stopSampling()
         }
     }
@@ -667,14 +681,21 @@ final class PulseIslandView: NSView {
             heatTitle: shot.heatTitle
         )
         lastApps = shot.apps
-        for (index, row) in rows.enumerated() {
-            if index < shot.apps.count {
-                row.isHidden = false
-                row.show(shot.apps[index])
-            } else {
-                row.isHidden = true
-            }
+        detailsPanel?.show(apps: shot.apps)
+    }
+
+    @objc private func openDetails() {
+        if let detailsPanel {
+            detailsPanel.show(over: window)
+            detailsPanel.show(apps: lastApps)
+            return
         }
+        let panel = PulseDetailsPanel()
+        panel.onQuit = { [weak self] key in self?.askQuit(key) }
+        panel.onClose = { [weak self] in self?.detailsPanel = nil }
+        detailsPanel = panel
+        panel.show(apps: lastApps)
+        panel.show(over: window)
     }
 
     /// Короткий вопрос, затем вежливое завершение.
@@ -688,7 +709,7 @@ final class PulseIslandView: NSView {
             guard ok else { return }
             self?.quitGracefully(app)
         }
-        prompt.show(over: window)
+        prompt.show(over: detailsPanel?.hostWindow ?? window)
     }
 
     /// Вежливое завершение программы пользователя. Без forceQuit.
@@ -706,7 +727,7 @@ final class PulseIslandView: NSView {
     }
 }
 
-/// Три спидометра: процессор, давление памяти, нагрев.
+/// Три кольца в духе GaugeKit / Apple Watch: толстая дуга, риски, мягкое свечение, плавный ход.
 private final class PulseGaugesView: NSView {
     private let cpu = PulseDialView(title: "Процессор")
     private let memory = PulseDialView(title: "Память")
@@ -728,16 +749,15 @@ private final class PulseGaugesView: NSView {
     }
 
     func update(cpu share: Double, memory pressure: Double, heat value: Double, heatTitle: String) {
-        self.cpu.set(share: share, caption: percent(share))
-        self.memory.set(share: pressure, caption: percent(pressure))
-        self.heat.set(share: value, caption: heatTitle)
-        needsLayout = true
+        self.cpu.set(share: share, caption: percent(share), animated: true)
+        self.memory.set(share: pressure, caption: percent(pressure), animated: true)
+        self.heat.set(share: value, caption: heatTitle, animated: true)
     }
 
     override func layout() {
         super.layout()
-        let gap: CGFloat = 10
-        let w = max(40, (bounds.width - gap * 2) / 3)
+        let gap: CGFloat = 16
+        let w = max(60, (bounds.width - gap * 2) / 3)
         cpu.frame = NSRect(x: 0, y: 0, width: w, height: bounds.height)
         memory.frame = NSRect(x: w + gap, y: 0, width: w, height: bounds.height)
         heat.frame = NSRect(x: (w + gap) * 2, y: 0, width: w, height: bounds.height)
@@ -748,31 +768,41 @@ private final class PulseGaugesView: NSView {
     }
 }
 
-/// Круговой индикатор доли.
+/// Одно кольцо: дорожка, заливка со свечением, риски, крупное значение в центре.
 private final class PulseDialView: NSView {
     private let titleLabel: NSTextField
     private let valueLabel: NSTextField
     private let track = CAShapeLayer()
+    private let ticks = CAShapeLayer()
     private let fill = CAShapeLayer()
+    private let tip = CAShapeLayer()
     private var share: Double = 0
+    private var dialRect = CGRect.zero
+
+    private let startAngle: CGFloat = .pi * 1.18
+    private let sweep: CGFloat = .pi * 1.36
 
     init(title: String) {
-        titleLabel = UtkaChrome.label(title, size: 11, color: UtkaChrome.dim)
-        valueLabel = UtkaChrome.label("—", size: 12, weight: .medium)
+        titleLabel = UtkaChrome.label(title, size: 12, color: UtkaChrome.dim)
+        valueLabel = UtkaChrome.label("—", size: 22, weight: .semibold)
         super.init(frame: .zero)
         wantsLayer = true
         titleLabel.alignment = .center
         valueLabel.alignment = .center
         track.fillColor = nil
-        track.lineWidth = 5
         track.lineCap = .round
+        ticks.fillColor = nil
+        ticks.lineCap = .round
         fill.fillColor = nil
-        fill.lineWidth = 5
         fill.lineCap = .round
+        tip.fillColor = nil
+        tip.lineCap = .round
         layer?.addSublayer(track)
+        layer?.addSublayer(ticks)
         layer?.addSublayer(fill)
-        addSubview(titleLabel)
+        layer?.addSublayer(tip)
         addSubview(valueLabel)
+        addSubview(titleLabel)
         applyLook()
     }
 
@@ -780,54 +810,253 @@ private final class PulseDialView: NSView {
 
     func applyLook() {
         titleLabel.textColor = UtkaChrome.dim
-        titleLabel.font = UtkaChrome.font(11)
+        titleLabel.font = UtkaChrome.font(12, weight: .medium)
         valueLabel.textColor = UtkaChrome.ink
-        valueLabel.font = UtkaChrome.font(12, weight: .medium)
+        valueLabel.font = UtkaChrome.font(22, weight: .semibold)
         track.strokeColor = UtkaChrome.card.cgColor
-        fill.strokeColor = IslandLook.accent.cgColor
-        redraw()
+        ticks.strokeColor = UtkaChrome.dim.withAlphaComponent(0.35).cgColor
+        let accent = IslandLook.accent
+        fill.strokeColor = accent.cgColor
+        tip.strokeColor = accent.cgColor
+        tip.fillColor = accent.cgColor
+        fill.shadowColor = accent.cgColor
+        fill.shadowRadius = 8
+        fill.shadowOpacity = IslandLook.dark ? 0.55 : 0.28
+        fill.shadowOffset = .zero
+        redraw(animated: false)
     }
 
-    func set(share: Double, caption: String) {
+    func set(share: Double, caption: String, animated: Bool) {
         self.share = min(1, max(0, share))
         valueLabel.stringValue = caption
-        redraw()
+        fitValueFont(for: caption)
+        redraw(animated: animated)
+    }
+
+    /// Крупный процент, короткое слово нагрева — без обрезки «Теп…».
+    private func fitValueFont(for caption: String) {
+        let size: CGFloat
+        switch caption.count {
+        case 0...2: size = 26
+        case 3...4: size = 22
+        case 5...6: size = 17
+        default: size = 14
+        }
+        valueLabel.font = UtkaChrome.font(size, weight: .semibold)
+        valueLabel.lineBreakMode = .byClipping
+        valueLabel.cell?.truncatesLastVisibleLine = false
     }
 
     override func layout() {
         super.layout()
-        titleLabel.frame = NSRect(x: 0, y: bounds.height - 14, width: bounds.width, height: 14)
-        valueLabel.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 16)
-        redraw()
-    }
-
-    private func redraw() {
-        let side = min(bounds.width, max(24, bounds.height - 30))
-        let rect = NSRect(
+        titleLabel.frame = NSRect(x: 0, y: 2, width: bounds.width, height: 16)
+        let side = min(bounds.width - 8, max(70, bounds.height - 36))
+        dialRect = NSRect(
             x: (bounds.width - side) / 2,
-            y: 16 + (bounds.height - 30 - side) / 2,
+            y: 22 + (bounds.height - 36 - side) / 2,
             width: side,
             height: side
-        ).insetBy(dx: 4, dy: 4)
+        )
+        let valueW = max(36, dialRect.width - 16)
+        valueLabel.frame = NSRect(
+            x: dialRect.midX - valueW / 2,
+            y: dialRect.midY - 18,
+            width: valueW,
+            height: 32
+        )
+        fitValueFont(for: valueLabel.stringValue)
+        redraw(animated: false)
+    }
+
+    private func redraw(animated: Bool) {
+        guard dialRect.width > 10 else { return }
+        let line: CGFloat = max(9, dialRect.width * 0.11)
+        let radius = min(dialRect.width, dialRect.height) / 2 - line / 2 - 2
+        let center = CGPoint(x: dialRect.midX, y: dialRect.midY)
+        let arc = CGMutablePath()
+        arc.addArc(center: center, radius: radius, startAngle: startAngle, endAngle: startAngle + sweep, clockwise: false)
+        track.lineWidth = line
+        track.path = arc
+        fill.lineWidth = line
+        fill.path = arc
+        ticks.lineWidth = 1.5
+        ticks.path = tickPath(center: center, radius: radius, line: line)
+
+        let next = CGFloat(share)
+        if animated, fill.presentation()?.strokeEnd != nil || fill.strokeEnd > 0 {
+            let anim = CABasicAnimation(keyPath: "strokeEnd")
+            anim.fromValue = fill.presentation()?.strokeEnd ?? fill.strokeEnd
+            anim.toValue = next
+            anim.duration = 0.55
+            anim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            fill.removeAnimation(forKey: "stroke")
+            fill.add(anim, forKey: "stroke")
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fill.strokeEnd = next
+        tip.path = tipPath(center: center, radius: radius, line: line, progress: next)
+        tip.lineWidth = 0
+        CATransaction.commit()
+    }
+
+    /// Короткие риски по дуге — как у GaugeKit / complication.
+    private func tickPath(center: CGPoint, radius: CGFloat, line: CGFloat) -> CGPath {
         let path = CGMutablePath()
-        path.addArc(
-            center: CGPoint(x: rect.midX, y: rect.midY),
-            radius: min(rect.width, rect.height) / 2,
-            startAngle: .pi * 1.15,
-            endAngle: .pi * -0.15,
-            clockwise: false
+        let count = 24
+        for i in 0...count {
+            let t = CGFloat(i) / CGFloat(count)
+            let angle = startAngle + sweep * t
+            let major = i % 4 == 0
+            let outer = radius + line * 0.12
+            let inner = radius - line * (major ? 0.42 : 0.22)
+            path.move(to: CGPoint(x: center.x + cos(angle) * inner, y: center.y + sin(angle) * inner))
+            path.addLine(to: CGPoint(x: center.x + cos(angle) * outer, y: center.y + sin(angle) * outer))
+        }
+        return path
+    }
+
+    /// Точка на конце дуги.
+    private func tipPath(center: CGPoint, radius: CGFloat, line: CGFloat, progress: CGFloat) -> CGPath {
+        let angle = startAngle + sweep * progress
+        let point = CGPoint(x: center.x + cos(angle) * radius, y: center.y + sin(angle) * radius)
+        let r = max(3.5, line * 0.38)
+        return CGPath(ellipseIn: CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2), transform: nil)
+    }
+}
+
+/// Попап «Детализация»: пять виновников в хроме утки.
+final class PulseDetailsPanel: NSObject {
+    var onQuit: ((String) -> Void)?
+    var onClose: (() -> Void)?
+    var hostWindow: NSWindow? { window }
+
+    private let window: PulseAskWindow
+    private let card = UtkaPanelChrome()
+    private let titleLabel = UtkaChrome.label("Кто грузит Мак", size: 14, weight: .semibold)
+    private let closeButton = NSButton()
+    private let list = FlippedView()
+    private var rows: [PulseAppRow] = []
+    private var escapeMonitor: Any?
+    private var lookToken: NSObjectProtocol?
+    private var closed = false
+
+    override init() {
+        window = PulseAskWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 268),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
         )
-        track.path = path
-        let progress = CGMutablePath()
-        let end = .pi * 1.15 + (.pi * 1.3) * CGFloat(share)
-        progress.addArc(
-            center: CGPoint(x: rect.midX, y: rect.midY),
-            radius: min(rect.width, rect.height) / 2,
-            startAngle: .pi * 1.15,
-            endAngle: end,
-            clockwise: false
+        super.init()
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.hidesOnDeactivate = false
+        window.isMovable = false
+        window.cancel = { [weak self] in self?.close() }
+        window.contentView = card
+        closeButton.title = "Закрыть"
+        closeButton.bezelStyle = .rounded
+        closeButton.font = UtkaChrome.font(13, weight: .medium)
+        closeButton.target = self
+        closeButton.action = #selector(closeTapped)
+        card.addSubview(titleLabel)
+        card.addSubview(list)
+        card.addSubview(closeButton)
+        for _ in 0..<5 {
+            let row = PulseAppRow()
+            row.onQuit = { [weak self] key in self?.onQuit?(key) }
+            list.addSubview(row)
+            rows.append(row)
+        }
+        lookToken = UtkaChrome.track(window) { [weak self] in
+            self?.applyLook()
+        }
+        layoutCard()
+    }
+
+    func applyLook() {
+        card.apply()
+        titleLabel.textColor = UtkaChrome.ink
+        titleLabel.font = UtkaChrome.font(14, weight: .semibold)
+        closeButton.font = UtkaChrome.font(13, weight: .medium)
+        closeButton.appearance = window.appearance
+        rows.forEach { $0.applyLook() }
+    }
+
+    /// Показывает карточку над островком.
+    func show(over host: NSWindow?) {
+        closed = false
+        let cardW: CGFloat = 420
+        let cardH: CGFloat = 268
+        let area = host?.frame ?? NSScreen.main?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: cardW, height: cardH)
+        window.setFrame(
+            NSRect(x: area.midX - cardW / 2, y: area.midY - cardH / 2, width: cardW, height: cardH),
+            display: false
         )
-        fill.path = progress
+        layoutCard()
+        window.orderFrontRegardless()
+        window.makeKey()
+        if escapeMonitor == nil {
+            escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard event.keyCode == 53 else { return event }
+                self?.close()
+                return nil
+            }
+        }
+    }
+
+    /// Обновляет строки, пока попап открыт.
+    func show(apps: [PulseApp]) {
+        for (index, row) in rows.enumerated() {
+            if index < apps.count {
+                row.isHidden = false
+                row.show(apps[index])
+            } else {
+                row.isHidden = true
+            }
+        }
+    }
+
+    @objc private func closeTapped() { close() }
+
+    func close() {
+        guard !closed else { return }
+        closed = true
+        if let escapeMonitor {
+            NSEvent.removeMonitor(escapeMonitor)
+            self.escapeMonitor = nil
+        }
+        if let lookToken {
+            NotificationCenter.default.removeObserver(lookToken)
+            self.lookToken = nil
+        }
+        window.orderOut(nil)
+        onClose?()
+    }
+
+    private func layoutCard() {
+        let pad: CGFloat = 14
+        let cardW: CGFloat = 420
+        let cardH: CGFloat = 268
+        let buttonW: CGFloat = 100
+        let buttonH: CGFloat = 28
+        titleLabel.frame = NSRect(x: pad, y: cardH - 34, width: cardW - pad * 2, height: 20)
+        closeButton.frame = NSRect(
+            x: cardW - pad - buttonW,
+            y: 12,
+            width: buttonW,
+            height: buttonH
+        )
+        list.frame = NSRect(x: pad, y: 48, width: cardW - pad * 2, height: cardH - 90)
+        let rowH: CGFloat = list.bounds.height / 5
+        for (index, row) in rows.enumerated() {
+            row.frame = NSRect(x: 0, y: CGFloat(index) * rowH, width: list.bounds.width, height: rowH)
+        }
     }
 }
 
