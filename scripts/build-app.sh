@@ -175,14 +175,21 @@ for arch in arm64 x86_64; do
     step_name=intel
   fi
   utka_step "$step_name"
+  smc="$BIN_DIR/PulseSMC-$arch.o"
   if clang -c -O2 -target "${arch}-apple-macosx13.3" \
     -I "$ROOT/AudioDriver" \
+    -I "$ROOT/Sources" \
     "$ROOT/Sources/UtkaPlay.c" \
     -o "$play" \
+    && clang -c -O2 -target "${arch}-apple-macosx13.3" \
+    -I "$ROOT/Sources" \
+    "$ROOT/Sources/PulseSMC.c" \
+    -o "$smc" \
     && swiftc -O -target "${arch}-apple-macosx13.3" \
     -import-objc-header "$ROOT/Sources/UtkaPlay.h" \
-    -framework AppKit -framework AVFoundation -framework ImageIO -framework CoreGraphics -framework CoreAudio -framework AudioToolbox -framework CoreFoundation \
+    -framework AppKit -framework AVFoundation -framework ImageIO -framework CoreGraphics -framework CoreAudio -framework AudioToolbox -framework CoreFoundation -framework IOKit \
     "$play" \
+    "$smc" \
     "$ROOT"/Sources/*.swift \
     -o "$out"
   then

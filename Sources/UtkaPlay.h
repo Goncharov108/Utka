@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "PulseSMC.h"
 
 /// 1, если виртуальный выход уже есть в системе.
 int UtkaPlayOpen(void);

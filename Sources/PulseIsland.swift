@@ -90,7 +90,7 @@ enum PulseReader {
     private static var prevTicks: [pid_t: UInt64] = [:]
     private static var prevStamp: CFAbsoluteTime = 0
 
-    /// Один опрос открытыми вызовами Darwin и AppKit. Без пароля и частных API.
+    /// Один опрос Darwin/AppKit. Температура — через SMC (недокументированный IOKit), без пароля.
     static func sample() -> PulseSnapshot {
         let cpu = systemCPU()
         let pressure = memoryPressure()
@@ -159,8 +159,14 @@ enum PulseReader {
         return min(1, max(0, heavy / total))
     }
 
-    /// Нагрев по ProcessInfo.thermalState. Градусов °C открытый API не даёт — только уровень.
+    /// Нагрев: градусы из SMC, иначе уровень ProcessInfo.thermalState.
     private static func heatGauge() -> (title: String, share: Double) {
+        var celsius = 0.0
+        if PulseSMCReadCelsius(&celsius) != 0, celsius > 1, celsius < 120 {
+            let share = min(1, max(0, (celsius - 35) / 55))
+            let title = String(format: "%.0f°", celsius)
+            return (title, share)
+        }
         switch ProcessInfo.processInfo.thermalState {
         case .nominal: return ("Ок", 0.12)
         case .fair: return ("Тепло", 0.4)
