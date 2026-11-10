@@ -516,33 +516,53 @@ enum PulseReader {
     }
 }
 
-/// Тело раздела «Пульс» на островке: виновник, красивые кольца, детализация в попапе.
+/// Тело раздела «Пульс»: кольца и шторка со списком (без отдельного попапа).
 final class PulseIslandView: NSView {
     private let headline = UtkaChrome.label("Считаю…", size: 15, weight: .semibold)
+    private let stage = NSView()
     private let gauges = PulseGaugesView()
-    private let detailsButton = NSButton()
+    private let list = FlippedView()
+    private let chevron = NSButton()
+    private var rows: [PulseAppRow] = []
     private var timer: Timer?
     private var lookObserver: NSObjectProtocol?
     private var windowObserver: NSObjectProtocol? = nil
     private var quitPrompt: PulseQuitPrompt?
-    private var detailsPanel: PulseDetailsPanel?
     private var lastApps: [PulseApp] = []
+    /// 0 — кольца, 1 — список. Кольца уезжают целиком вверх.
+    private var drawerProgress: CGFloat = 0
+    private var drawerOpen = false
+    private var drawerFrom: CGFloat = 0
+    private var drawerTo: CGFloat = 0
+    private var drawerStart: Date?
+    private var drawerTimer: Timer?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        stage.wantsLayer = true
+        stage.layer?.masksToBounds = true
         headline.maximumNumberOfLines = 2
         headline.cell?.wraps = true
         headline.cell?.truncatesLastVisibleLine = true
-        detailsButton.title = "Детализация"
-        detailsButton.bezelStyle = .rounded
-        detailsButton.controlSize = .regular
-        detailsButton.font = UtkaChrome.font(13, weight: .medium)
-        detailsButton.target = self
-        detailsButton.action = #selector(openDetails)
+        chevron.isBordered = false
+        chevron.bezelStyle = .shadowlessSquare
+        chevron.imagePosition = .imageOnly
+        chevron.target = self
+        chevron.action = #selector(toggleDrawer)
+        chevron.toolTip = "Кто грузит Мак"
         addSubview(headline)
-        addSubview(gauges)
-        addSubview(detailsButton)
+        addSubview(stage)
+        stage.addSubview(gauges)
+        stage.addSubview(list)
+        stage.addSubview(chevron)
+        for _ in 0..<5 {
+            let row = PulseAppRow()
+            row.onQuit = { [weak self] key in self?.askQuit(key) }
+            list.addSubview(row)
+            rows.append(row)
+        }
+        paintChevron()
         applyLook()
         lookObserver = NotificationCenter.default.addObserver(
             forName: IslandLook.changed,
@@ -557,7 +577,7 @@ final class PulseIslandView: NSView {
 
     deinit {
         stopSampling()
-        detailsPanel?.close()
+        drawerTimer?.invalidate()
         if let lookObserver {
             NotificationCenter.default.removeObserver(lookObserver)
         }
@@ -571,9 +591,8 @@ final class PulseIslandView: NSView {
         headline.textColor = UtkaChrome.ink
         headline.font = UtkaChrome.font(15, weight: .semibold)
         gauges.applyLook()
-        detailsButton.font = UtkaChrome.font(13, weight: .medium)
-        detailsButton.appearance = IslandLook.appearance
-        detailsPanel?.applyLook()
+        rows.forEach { $0.applyLook() }
+        paintChevron()
     }
 
     /// Включает опрос, когда раздел на экране.
@@ -581,8 +600,7 @@ final class PulseIslandView: NSView {
         if on {
             startSampling()
         } else {
-            detailsPanel?.close()
-            detailsPanel = nil
+            collapseDrawer(animated: false)
             stopSampling()
         }
     }
@@ -620,27 +638,38 @@ final class PulseIslandView: NSView {
         layoutPulse()
     }
 
-    /// Верх — виновник, центр — крупные кольца, низ — кнопка детализации.
+    /// Верх — виновник, сцена — кольца или список, снизу/сверху стрелка.
     private func layoutPulse() {
         let pad: CGFloat = 10
         let width = max(40, bounds.width - pad * 2)
         let headH: CGFloat = 38
-        let buttonH: CGFloat = 28
+        let arrowH: CGFloat = 22
         headline.frame = NSRect(x: pad, y: bounds.height - headH - 4, width: width, height: headH)
-        detailsButton.frame = NSRect(
-            x: pad,
-            y: 6,
-            width: min(140, width),
-            height: buttonH
+        let stageTop = headline.frame.minY - 4
+        let stageBottom: CGFloat = 4
+        let stageH = max(80, stageTop - stageBottom)
+        stage.frame = NSRect(x: pad, y: stageBottom, width: width, height: stageH)
+
+        let p = drawerProgress
+        let contentH = max(1, stageH - arrowH)
+        // Кольца уезжают вверх целиком; список поднимается снизу.
+        gauges.frame = NSRect(x: 0, y: arrowH + p * stageH, width: width, height: contentH)
+        list.frame = NSRect(x: 0, y: -contentH + p * contentH, width: width, height: contentH)
+        let rowH = contentH / 5
+        for (index, row) in rows.enumerated() {
+            row.frame = NSRect(x: 0, y: CGFloat(index) * rowH, width: width, height: rowH)
+        }
+        // Стрелка: внизу под кольцами → наверх над списком.
+        chevron.frame = NSRect(
+            x: (width - 36) / 2,
+            y: (1 - p) * 2 + p * (stageH - arrowH),
+            width: 36,
+            height: arrowH
         )
-        let gaugeTop = headline.frame.minY - 6
-        let gaugeBottom = detailsButton.frame.maxY + 8
-        gauges.frame = NSRect(
-            x: pad,
-            y: gaugeBottom,
-            width: width,
-            height: max(90, gaugeTop - gaugeBottom)
-        )
+        if stage.subviews.last !== chevron {
+            stage.addSubview(chevron, positioned: .above, relativeTo: nil)
+        }
+        paintChevron()
     }
 
     /// Опрос только пока раздел открыт и островок виден.
@@ -649,8 +678,7 @@ final class PulseIslandView: NSView {
         if visible {
             startSampling()
         } else {
-            detailsPanel?.close()
-            detailsPanel = nil
+            collapseDrawer(animated: false)
             stopSampling()
         }
     }
@@ -687,21 +715,68 @@ final class PulseIslandView: NSView {
             heatTitle: shot.heatTitle
         )
         lastApps = shot.apps
-        detailsPanel?.show(apps: shot.apps)
+        for (index, row) in rows.enumerated() {
+            if index < shot.apps.count {
+                row.isHidden = false
+                row.show(shot.apps[index])
+            } else {
+                row.isHidden = true
+            }
+        }
     }
 
-    @objc private func openDetails() {
-        if let detailsPanel {
-            detailsPanel.show(over: window)
-            detailsPanel.show(apps: lastApps)
+    @objc private func toggleDrawer() {
+        setDrawer(open: !drawerOpen, animated: true)
+    }
+
+    private func collapseDrawer(animated: Bool) {
+        setDrawer(open: false, animated: animated)
+    }
+
+    /// Открывает или закрывает шторку. Кольца уезжают целиком вверх.
+    private func setDrawer(open: Bool, animated: Bool) {
+        drawerOpen = open
+        drawerFrom = drawerProgress
+        drawerTo = open ? 1 : 0
+        chevron.toolTip = open ? "К кольцам" : "Кто грузит Мак"
+        guard animated, abs(drawerTo - drawerFrom) > 0.01 else {
+            drawerProgress = drawerTo
+            drawerTimer?.invalidate()
+            drawerTimer = nil
+            layoutPulse()
             return
         }
-        let panel = PulseDetailsPanel()
-        panel.onQuit = { [weak self] key in self?.askQuit(key) }
-        panel.onClose = { [weak self] in self?.detailsPanel = nil }
-        detailsPanel = panel
-        panel.show(apps: lastApps)
-        panel.show(over: window)
+        drawerStart = Date()
+        guard drawerTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            self?.stepDrawer(timer)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        drawerTimer = timer
+    }
+
+    private func stepDrawer(_ timer: Timer) {
+        let elapsed = Date().timeIntervalSince(drawerStart ?? Date())
+        let progress = min(1, elapsed / 0.34)
+        let eased = 1 - pow(1 - progress, 3)
+        drawerProgress = drawerFrom + (drawerTo - drawerFrom) * CGFloat(eased)
+        layoutPulse()
+        guard progress >= 1 else { return }
+        timer.invalidate()
+        drawerTimer = nil
+        drawerProgress = drawerTo
+        layoutPulse()
+    }
+
+    private func paintChevron() {
+        let name = drawerProgress > 0.5 ? "chevron.up" : "chevron.down"
+        let image = NSImage(
+            systemSymbolName: name,
+            accessibilityDescription: drawerProgress > 0.5 ? "Свернуть" : "Детализация"
+        )?.withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
+        chevron.image = image
+        chevron.contentTintColor = UtkaChrome.dim
+        chevron.appearance = IslandLook.appearance
     }
 
     /// Короткий вопрос, затем вежливое завершение.
@@ -715,7 +790,7 @@ final class PulseIslandView: NSView {
             guard ok else { return }
             self?.quitGracefully(app)
         }
-        prompt.show(over: detailsPanel?.hostWindow ?? window)
+        prompt.show(over: window)
     }
 
     /// Вежливое завершение программы пользователя. Без forceQuit.
@@ -928,141 +1003,6 @@ private final class PulseDialView: NSView {
         let point = CGPoint(x: center.x + cos(angle) * radius, y: center.y + sin(angle) * radius)
         let r = max(3.5, line * 0.38)
         return CGPath(ellipseIn: CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2), transform: nil)
-    }
-}
-
-/// Попап «Детализация»: пять виновников в хроме утки.
-final class PulseDetailsPanel: NSObject {
-    var onQuit: ((String) -> Void)?
-    var onClose: (() -> Void)?
-    var hostWindow: NSWindow? { window }
-
-    private let window: PulseAskWindow
-    private let card = UtkaPanelChrome()
-    private let titleLabel = UtkaChrome.label("Кто грузит Мак", size: 14, weight: .semibold)
-    private let closeButton = NSButton()
-    private let list = FlippedView()
-    private var rows: [PulseAppRow] = []
-    private var escapeMonitor: Any?
-    private var lookToken: NSObjectProtocol?
-    private var closed = false
-
-    override init() {
-        window = PulseAskWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 268),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        super.init()
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = true
-        window.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.hidesOnDeactivate = false
-        window.isMovable = false
-        window.cancel = { [weak self] in self?.close() }
-        window.contentView = card
-        closeButton.title = "Закрыть"
-        closeButton.bezelStyle = .rounded
-        closeButton.font = UtkaChrome.font(13, weight: .medium)
-        closeButton.target = self
-        closeButton.action = #selector(closeTapped)
-        card.addSubview(titleLabel)
-        card.addSubview(list)
-        card.addSubview(closeButton)
-        for _ in 0..<5 {
-            let row = PulseAppRow()
-            row.onQuit = { [weak self] key in self?.onQuit?(key) }
-            list.addSubview(row)
-            rows.append(row)
-        }
-        lookToken = UtkaChrome.track(window) { [weak self] in
-            self?.applyLook()
-        }
-        layoutCard()
-    }
-
-    func applyLook() {
-        card.apply()
-        titleLabel.textColor = UtkaChrome.ink
-        titleLabel.font = UtkaChrome.font(14, weight: .semibold)
-        closeButton.font = UtkaChrome.font(13, weight: .medium)
-        closeButton.appearance = window.appearance
-        rows.forEach { $0.applyLook() }
-    }
-
-    /// Показывает карточку над островком.
-    func show(over host: NSWindow?) {
-        closed = false
-        let cardW: CGFloat = 420
-        let cardH: CGFloat = 268
-        let area = host?.frame ?? NSScreen.main?.visibleFrame
-            ?? NSRect(x: 0, y: 0, width: cardW, height: cardH)
-        window.setFrame(
-            NSRect(x: area.midX - cardW / 2, y: area.midY - cardH / 2, width: cardW, height: cardH),
-            display: false
-        )
-        layoutCard()
-        window.orderFrontRegardless()
-        window.makeKey()
-        if escapeMonitor == nil {
-            escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard event.keyCode == 53 else { return event }
-                self?.close()
-                return nil
-            }
-        }
-    }
-
-    /// Обновляет строки, пока попап открыт.
-    func show(apps: [PulseApp]) {
-        for (index, row) in rows.enumerated() {
-            if index < apps.count {
-                row.isHidden = false
-                row.show(apps[index])
-            } else {
-                row.isHidden = true
-            }
-        }
-    }
-
-    @objc private func closeTapped() { close() }
-
-    func close() {
-        guard !closed else { return }
-        closed = true
-        if let escapeMonitor {
-            NSEvent.removeMonitor(escapeMonitor)
-            self.escapeMonitor = nil
-        }
-        if let lookToken {
-            NotificationCenter.default.removeObserver(lookToken)
-            self.lookToken = nil
-        }
-        window.orderOut(nil)
-        onClose?()
-    }
-
-    private func layoutCard() {
-        let pad: CGFloat = 14
-        let cardW: CGFloat = 420
-        let cardH: CGFloat = 268
-        let buttonW: CGFloat = 100
-        let buttonH: CGFloat = 28
-        titleLabel.frame = NSRect(x: pad, y: cardH - 34, width: cardW - pad * 2, height: 20)
-        closeButton.frame = NSRect(
-            x: cardW - pad - buttonW,
-            y: 12,
-            width: buttonW,
-            height: buttonH
-        )
-        list.frame = NSRect(x: pad, y: 48, width: cardW - pad * 2, height: cardH - 90)
-        let rowH: CGFloat = list.bounds.height / 5
-        for (index, row) in rows.enumerated() {
-            row.frame = NSRect(x: 0, y: CGFloat(index) * rowH, width: list.bounds.width, height: rowH)
-        }
     }
 }
 
