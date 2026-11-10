@@ -765,6 +765,8 @@ final class IslandPanel {
     private let shotTarget = ShotButtonTarget()
     private let body = NSView()
     private let sectionRail = NSView()
+    /// Столбец значков. Утка настроек стоит рядом и не едет вместе с ним.
+    private let railColumn = SectionRailColumn()
     private var bodies: [String: NSView] = [:]
     private var railButtons: [SectionRailButton] = []
     private var buttonTargets: [String: NSRect] = [:]
@@ -882,6 +884,7 @@ final class IslandPanel {
 
         let markView = DuckMarkView()
         markView.image = mark.map { MenuMark.cutout(from: $0) }
+        sectionRail.addSubview(railColumn)
         sectionRail.addSubview(markView)
         syncRail()
 
@@ -928,6 +931,9 @@ final class IslandPanel {
         NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: root, queue: .main) { _ in
             self.sectionRail.frame = NSRect(x: 0, y: 0, width: 88, height: self.root.bounds.height)
             markView.frame = NSRect(x: 44, y: self.root.bounds.height - 86, width: 40, height: 40)
+            let railBottom: CGFloat = 14
+            let railTop = self.root.bounds.height - 96
+            self.railColumn.frame = NSRect(x: 0, y: railBottom, width: 88, height: max(RailIcon.side, railTop - railBottom))
             self.placeSectionButtons(animated: false)
             let bottom: CGFloat = 14
             let right: CGFloat = 48
@@ -961,44 +967,41 @@ final class IslandPanel {
         applyLook()
     }
 
-    /// Кнопки разделов сверху вниз в сохранённом порядке. Четыре ядровых остаются 36×36 с шагом 42.
+    /// Кнопки разделов сверху вниз в сохранённом порядке. Значок всегда 36×36, шаг 42.
     private func placeSectionButtons(animated: Bool) {
         let visible = SectionBoard.visible
-        let metrics = railMetrics(count: max(visible.count, 1))
-        var y = root.bounds.height - 132
+        var y: CGFloat = 0
+        var contentHeight: CGFloat = 0
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         let visibleIDs = Set(visible.map(\.id))
         for button in railButtons {
             let on = visibleIDs.contains(button.slotID)
             button.isHidden = !on
-            button.updateSymbol(point: metrics.symbol)
+            button.updateSymbol(point: RailIcon.symbol)
             if !on { buttonTargets.removeValue(forKey: button.slotID) }
         }
         for slot in visible {
             guard let button = railButtons.first(where: { $0.slotID == slot.id }) else { continue }
-            let target = NSRect(x: 64 - metrics.size / 2, y: y, width: metrics.size, height: metrics.size)
-            y -= metrics.pitch
+            let target = NSRect(
+                x: RailIcon.centerX - RailIcon.side / 2,
+                y: y,
+                width: RailIcon.side,
+                height: RailIcon.side
+            )
+            contentHeight = target.maxY
+            y += RailIcon.pitch
             buttonTargets[slot.id] = target
             if !animated || button.frame == .zero {
                 button.frame = target
             }
         }
+        railColumn.setContentHeight(contentHeight)
         CATransaction.commit()
         if animated { kickButtonMotion() }
         if !visibleIDs.contains(currentID), let next = visible.first {
             select(slotID: next.id)
         }
-    }
-
-    /// Шаг полосы. При четырёх и меньше кадр прежний, дальше значки сжимаются внутри той же высоты.
-    private func railMetrics(count: Int) -> (size: CGFloat, pitch: CGFloat, symbol: CGFloat) {
-        if count <= 4 { return (36, 42, 16) }
-        let room = max(36, root.bounds.height - 132 - 14)
-        let fitted = room / CGFloat(max(count - 1, 1))
-        let pitch = min(42, max(22, fitted))
-        let size = min(36, pitch)
-        return (size, pitch, max(11, size * 16 / 36))
     }
 
     /// Собирает кнопки по текущему списку. Лишние разделы библиотеки с полосы уходят.
@@ -1016,7 +1019,7 @@ final class IslandPanel {
                 continue
             }
             let button = SectionRailButton(slot: slot)
-            sectionRail.addSubview(button)
+            railColumn.document.addSubview(button)
             railButtons.append(button)
         }
         for id in Array(bodies.keys) where IslandSection(slotID: id) == nil && !ids.contains(id) {
@@ -1180,16 +1183,19 @@ final class IslandPanel {
         view.autoresizingMask = [.width, .height]
         body.addSubview(view)
         if let note = view as? NotepadIslandView { note.focusText() }
+        if let pulse = view as? PulseIslandView { pulse.setActive(true) }
         for button in railButtons {
             let on = button.slotID == id
             button.contentTintColor = on ? IslandLook.accent : UtkaChrome.dim
         }
+        railColumn.reveal(buttonTargets[id], animated: true)
     }
 
-    /// Тело ядра уже собрано. Блокнот — своё поле. Остальные разделы библиотеки — тихая карточка.
+    /// Тело ядра уже собрано. Блокнот и Пульс — свои поля. Остальные разделы библиотеки — тихая карточка.
     private func viewFor(_ id: String) -> NSView {
         if let core = bodies[id], IslandSection(slotID: id) != nil { return core }
         if id == "notepad" { return notepadView() }
+        if id == "pulse" { return pulseView() }
         let title = SectionBoard.order.first { $0.id == id }?.listTitle ?? id
         if let card = bodies[id] as? LibrarySectionBody {
             card.setTitle(title)
@@ -1208,6 +1214,14 @@ final class IslandPanel {
             self?.sendNoteToShelf(url, from: anchor)
         }
         bodies["notepad"] = view
+        return view
+    }
+
+    /// Раздел «Пульс»: нагрузка Мака, пока карточка на островке.
+    private func pulseView() -> PulseIslandView {
+        if let view = bodies["pulse"] as? PulseIslandView { return view }
+        let view = PulseIslandView()
+        bodies["pulse"] = view
         return view
     }
 
@@ -1251,6 +1265,191 @@ final class IslandPanel {
 
     private func roughly(_ a: CGRect, _ b: CGRect) -> Bool {
         abs(a.minX - b.minX) < 2 && abs(a.minY - b.minY) < 2 && abs(a.width - b.width) < 2 && abs(a.height - b.height) < 2
+    }
+}
+
+/// Размер значка на полосе. Не сжимается, сколько бы разделов ни было.
+private enum RailIcon {
+    static let side: CGFloat = 36
+    static let pitch: CGFloat = 42
+    static let symbol: CGFloat = 16
+    static let centerX: CGFloat = 64
+}
+
+/// Прокрутка столбца. Колёсико останавливает доезд к выбранному значку.
+private final class RailScrollView: NSScrollView {
+    var onUserScroll: (() -> Void)?
+
+    override func scrollWheel(with event: NSEvent) {
+        onUserScroll?()
+        super.scrollWheel(with: event)
+    }
+}
+
+/// Столбец кнопок разделов: колёсико и тачпад, края гаснут, где значки спрятаны.
+private final class SectionRailColumn: NSView {
+    let document = FlippedView()
+    private let scroll = RailScrollView()
+    private let fade: CGFloat = 22
+    private var fadeObserver: NSObjectProtocol?
+    private var scrollFrom: CGFloat = 0
+    private var scrollTo: CGFloat = 0
+    private var scrollStart: Date?
+    private var scrollTimer: Timer?
+
+    override var isOpaque: Bool { false }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        let clip = FlippedClipView()
+        clip.drawsBackground = false
+        clip.backgroundColor = .clear
+        scroll.contentView = clip
+        scroll.documentView = document
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.backgroundColor = .clear
+        scroll.horizontalScrollElasticity = .none
+        scroll.verticalLineScroll = RailIcon.pitch
+        scroll.verticalScroller?.controlSize = .mini
+        scroll.contentView.drawsBackground = false
+        scroll.onUserScroll = { [weak self] in self?.stopScroll() }
+        clip.postsBoundsChangedNotifications = true
+        fadeObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: clip,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateFade()
+        }
+        addSubview(scroll)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    deinit {
+        scrollTimer?.invalidate()
+        if let fadeObserver {
+            NotificationCenter.default.removeObserver(fadeObserver)
+        }
+    }
+
+    /// Высота списка. Короче окна — значки остаются сверху и не прокручиваются.
+    func setContentHeight(_ height: CGFloat) {
+        scroll.frame = bounds
+        layoutSubtreeIfNeeded()
+        let saved = scroll.contentView.bounds.origin.y
+        let clipHeight = scroll.contentView.bounds.height
+        let width = max(scroll.contentView.bounds.width, bounds.width, 1)
+        document.frame = NSRect(x: 0, y: 0, width: width, height: max(height, clipHeight, 1))
+        let maxY = max(0, document.frame.height - scroll.contentView.bounds.height)
+        scrollInstantly(to: min(max(0, saved), maxY))
+    }
+
+    /// Докручивает столбец, чтобы прямоугольник значка был виден целиком.
+    func reveal(_ rect: NSRect?, animated: Bool) {
+        guard let rect else { return }
+        layoutSubtreeIfNeeded()
+        scroll.layoutSubtreeIfNeeded()
+        let visible = scroll.contentView.bounds
+        guard visible.height > 1 else { return }
+        let inset = min(fade, max(0, (visible.height - rect.height) / 2))
+        var y = visible.origin.y
+        if rect.minY < y + inset {
+            y = rect.minY - inset
+        } else if rect.maxY > y + visible.height - inset {
+            y = rect.maxY - visible.height + inset
+        } else {
+            return
+        }
+        let maxY = max(0, document.frame.height - visible.height)
+        y = min(max(0, y), maxY)
+        guard abs(y - visible.origin.y) > 0.5 else { return }
+        if animated {
+            animateScroll(to: y)
+        } else {
+            scrollInstantly(to: y)
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        if scroll.frame != bounds {
+            scroll.frame = bounds
+        }
+        updateFade()
+    }
+
+    /// Края гаснут только там, где за ними ещё есть значки.
+    private func updateFade() {
+        guard let layer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        let visible = scroll.contentView.bounds
+        let topHidden = visible.minY > 0.5
+        let bottomHidden = document.frame.height - visible.maxY > 0.5
+        guard (topHidden || bottomHidden), bounds.height > 1 else {
+            layer.mask = nil
+            return
+        }
+        let mask = (layer.mask as? CAGradientLayer) ?? CAGradientLayer()
+        mask.frame = bounds
+        let frac = Double(min(0.42, fade / bounds.height))
+        let clear = NSColor.clear.cgColor
+        let solid = NSColor.black.cgColor
+        mask.startPoint = CGPoint(x: 0.5, y: 1)
+        mask.endPoint = CGPoint(x: 0.5, y: 0)
+        mask.colors = [
+            topHidden ? clear : solid,
+            solid,
+            solid,
+            bottomHidden ? clear : solid
+        ]
+        mask.locations = [0, NSNumber(value: frac), NSNumber(value: 1 - frac), 1]
+        if layer.mask !== mask {
+            layer.mask = mask
+        }
+    }
+
+    private func scrollInstantly(to y: CGFloat) {
+        let clip = scroll.contentView
+        clip.scroll(to: NSPoint(x: 0, y: y))
+        scroll.reflectScrolledClipView(clip)
+        updateFade()
+    }
+
+    private func animateScroll(to y: CGFloat) {
+        scrollFrom = scroll.contentView.bounds.origin.y
+        scrollTo = y
+        scrollStart = Date()
+        guard scrollTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            self?.stepScroll(timer)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        scrollTimer = timer
+    }
+
+    /// Кадры сами: у фоновой утки системный аниматор не тикает.
+    private func stepScroll(_ timer: Timer) {
+        let elapsed = Date().timeIntervalSince(scrollStart ?? Date())
+        let progress = min(1, elapsed / 0.28)
+        let eased = 1 - pow(1 - progress, 3)
+        scrollInstantly(to: scrollFrom + (scrollTo - scrollFrom) * eased)
+        guard progress >= 1 else { return }
+        timer.invalidate()
+        scrollTimer = nil
+    }
+
+    private func stopScroll() {
+        scrollTimer?.invalidate()
+        scrollTimer = nil
     }
 }
 

@@ -3,5 +3,10 @@
     "id": "notepad",
     "title": "Блокнот",
     "symbol": "note.text"
+  },
+  {
+    "id": "pulse",
+    "title": "Пульс",
+    "symbol": "waveform.path.ecg"
   }
 ]
