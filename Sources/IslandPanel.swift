@@ -1290,7 +1290,7 @@ private final class RailScrollView: NSScrollView {
 private final class SectionRailColumn: NSView {
     let document = FlippedView()
     private let scroll = RailScrollView()
-    private let fade: CGFloat = 22
+    private let fade: CGFloat = 30
     private var fadeObserver: NSObjectProtocol?
     private var scrollFrom: CGFloat = 0
     private var scrollTo: CGFloat = 0
@@ -1302,21 +1302,21 @@ private final class SectionRailColumn: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        canDrawSubviewsIntoLayer = true
         let clip = FlippedClipView()
         clip.drawsBackground = false
         clip.backgroundColor = .clear
         scroll.contentView = clip
         scroll.documentView = document
-        scroll.hasVerticalScroller = true
+        scroll.hasVerticalScroller = false
         scroll.hasHorizontalScroller = false
-        scroll.autohidesScrollers = true
-        scroll.scrollerStyle = .overlay
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         scroll.backgroundColor = .clear
         scroll.horizontalScrollElasticity = .none
         scroll.verticalLineScroll = RailIcon.pitch
-        scroll.verticalScroller?.controlSize = .mini
+        scroll.wantsLayer = true
+        scroll.contentView.wantsLayer = true
         scroll.contentView.drawsBackground = false
         scroll.onUserScroll = { [weak self] in self?.stopScroll() }
         clip.postsBoundsChangedNotifications = true
@@ -1387,6 +1387,7 @@ private final class SectionRailColumn: NSView {
 
     /// Края гаснут только там, где за ними ещё есть значки.
     private func updateFade() {
+        wantsLayer = true
         guard let layer else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -1400,9 +1401,9 @@ private final class SectionRailColumn: NSView {
         }
         let mask = (layer.mask as? CAGradientLayer) ?? CAGradientLayer()
         mask.frame = bounds
-        let frac = Double(min(0.42, fade / bounds.height))
-        let clear = NSColor.clear.cgColor
-        let solid = NSColor.black.cgColor
+        let frac = Double(min(0.45, fade / visible.height))
+        let clear = CGColor(gray: 0, alpha: 0)
+        let solid = CGColor(gray: 0, alpha: 1)
         mask.startPoint = CGPoint(x: 0.5, y: 1)
         mask.endPoint = CGPoint(x: 0.5, y: 0)
         mask.colors = [
