@@ -6,9 +6,28 @@ import CryptoKit
 /// utka-apps/utka-translate, скачиваются один раз в поддержку утки и
 /// дальше работают полностью локально, без единого обращения в сеть.
 enum NativeTranslate {
+    /// Понятный текст вместо сырого «Bad CPU type in executable».
+    static let wrongProcessorMessage = "Движок не для этого процессора — скачайте заново в настройках"
+
+    #if arch(arm64)
     private static let releaseURL = URL(
         string: "https://github.com/utka-apps/utka-translate/releases/download/v0.1.0-runtime-macos-arm64/utka-translate-macos-arm64.zip"
     )!
+    /// SHA-256 архива v0.1.0-runtime-macos-arm64.
+    private static let expectedSHA256 = "622a640cd30632ae5b8b7f1bad1a9e78ceab11f65b007edbfc3c4be16e3263c1"
+    /// CPU_TYPE_ARM64 в заголовке Mach-O.
+    private static let hostCPUType: UInt32 = 0x0100000c
+    #elseif arch(x86_64)
+    private static let releaseURL = URL(
+        string: "https://github.com/utka-apps/utka-translate/releases/download/v0.1.1-runtime-macos-x86_64/utka-translate-macos-x86_64.zip"
+    )!
+    /// SHA-256 архива v0.1.1-runtime-macos-x86_64.
+    private static let expectedSHA256 = "b96a903d32b348aab520103d23c4b0eee78b8595c26eef9296d514f9d7d8b290"
+    /// CPU_TYPE_X86_64 в заголовке Mach-O.
+    private static let hostCPUType: UInt32 = 0x01000007
+    #else
+    #error("Движок перевода собран только для arm64 и x86_64")
+    #endif
 
     private static var root: URL {
         UtkaPaths.support.appendingPathComponent("Translate", isDirectory: true)
@@ -23,9 +42,11 @@ enum NativeTranslate {
     }
 
     /// Стоит ли уже движок на диске и можно ли им пользоваться сейчас.
+    /// Чужая архитектура не считается установкой: кнопка «Скачать» остаётся.
     static var isInstalled: Bool {
         FileManager.default.isExecutableFile(atPath: binary.path)
             && FileManager.default.fileExists(atPath: modelsDir.path)
+            && executableMatchesThisMac(binary)
     }
 
     /// Переводит, если движок уже скачан. nil — не установлен, нужно вызвать download.
@@ -46,14 +67,14 @@ enum NativeTranslate {
         do {
             try process.run()
         } catch {
-            return .failure(TranslateFailure(message: error.localizedDescription))
+            return .failure(failure(from: error))
         }
         process.waitUntilExit()
         let output = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard process.terminationStatus == 0, !output.isEmpty else {
             let errText = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            return .failure(TranslateFailure(message: errText.isEmpty ? "Свой переводчик не ответил" : errText))
+            return .failure(failure(from: errText))
         }
         return .success(output)
     }
@@ -92,6 +113,12 @@ enum NativeTranslate {
                     }
                     return
                 }
+                // Старую папку сносим целиком: модели приедут в новом архиве,
+                // и библиотеки другой архитектуры не останутся рядом.
+                let engine = root.appendingPathComponent("utka-translate", isDirectory: true)
+                if FileManager.default.fileExists(atPath: engine.path) {
+                    try FileManager.default.removeItem(at: engine)
+                }
                 try unzip(zipPath, into: root)
                 try? FileManager.default.removeItem(at: zipPath)
                 let ready = isInstalled
@@ -103,11 +130,7 @@ enum NativeTranslate {
         task.resume()
     }
 
-    /// SHA-256 архива из релиза v0.1.0-runtime-macos-arm64. Меняется вместе со ссылкой выше:
-    /// выпустили новый релиз — пересчитайте `shasum -a 256` и обновите оба значения.
-    private static let expectedSHA256 = "622a640cd30632ae5b8b7f1bad1a9e78ceab11f65b007edbfc3c4be16e3263c1"
-
-    /// Отпечаток файла по кускам: архив 144 МБ целиком в память не читаем.
+    /// Отпечаток файла по кускам: архив целиком в память не читаем.
     private static func sha256(of file: URL) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
         defer { try? handle.close() }
@@ -135,5 +158,67 @@ enum NativeTranslate {
         unquarantine.arguments = ["-dr", "com.apple.quarantine", root.appendingPathComponent("utka-translate").path]
         try? unquarantine.run()
         unquarantine.waitUntilExit()
+    }
+
+    /// Заголовок Mach-O совпадает с процессором этой утки. Файл не запускаем.
+    private static func executableMatchesThisMac(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: 512), data.count >= 8 else { return false }
+        return machoMatchesHost(data)
+    }
+
+    /// Читает magic и cputype тонкого файла или список архитектур универсального.
+    private static func machoMatchesHost(_ data: Data) -> Bool {
+        guard let magic = u32(data, 0, bigEndian: false) else { return false }
+        if magic == 0xFEEDFACF || magic == 0xFEEDFACE {
+            return u32(data, 4, bigEndian: false) == hostCPUType
+        }
+        if magic == 0xCFFAEDFE || magic == 0xCEFAEDFE {
+            guard let cpu = u32(data, 4, bigEndian: false) else { return false }
+            return cpu.byteSwapped == hostCPUType
+        }
+        let fatBE = magic == 0xBEBAFECA
+        let fatLE = magic == 0xCAFEBABE
+        guard fatBE || fatLE, let count = u32(data, 4, bigEndian: fatBE), (1..<16).contains(count) else {
+            return false
+        }
+        var offset = 8
+        for _ in 0..<Int(count) {
+            guard let cpu = u32(data, offset, bigEndian: fatBE) else { return false }
+            if cpu == hostCPUType { return true }
+            offset += 20
+        }
+        return false
+    }
+
+    /// Четыре байта заголовка. У тонкого Mach-O они в порядке этого Мака, у fat — часто наоборот.
+    private static func u32(_ data: Data, _ offset: Int, bigEndian: Bool) -> UInt32? {
+        guard data.count >= offset + 4 else { return nil }
+        let b0 = UInt32(data[offset])
+        let b1 = UInt32(data[offset + 1])
+        let b2 = UInt32(data[offset + 2])
+        let b3 = UInt32(data[offset + 3])
+        if bigEndian {
+            return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        }
+        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    }
+
+    /// «Bad CPU type» — и код POSIX 86, и текст из stderr — заменяем на одну фразу.
+    private static func failure(from error: Error) -> TranslateFailure {
+        let ns = error as NSError
+        if ns.domain == NSPOSIXErrorDomain && ns.code == Int(EBADARCH) {
+            return TranslateFailure(message: wrongProcessorMessage)
+        }
+        return failure(from: ns.localizedDescription)
+    }
+
+    private static func failure(from raw: String) -> TranslateFailure {
+        if raw.localizedCaseInsensitiveContains("Bad CPU type") {
+            return TranslateFailure(message: wrongProcessorMessage)
+        }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return TranslateFailure(message: trimmed.isEmpty ? "Свой переводчик не ответил" : trimmed)
     }
 }

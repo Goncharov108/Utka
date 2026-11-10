@@ -168,6 +168,10 @@ final class TranslatorView: NSView {
         if raw == "not-installed" {
             return "Свой переводчик не скачан — откройте настройки утки"
         }
+        if raw == NativeTranslate.wrongProcessorMessage
+            || raw.localizedCaseInsensitiveContains("Bad CPU type") {
+            return NativeTranslate.wrongProcessorMessage
+        }
         return "Не удалось перевести"
     }
 }

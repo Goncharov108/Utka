@@ -17,7 +17,7 @@
 
 ## Что нужно
 
-- macOS 13.3 или новее. Для перевода нужна Apple Silicon (движок пока собран только под arm64).
+- macOS 13.3 или новее. Перевод работает на Apple Silicon и на Intel: Утка скачивает движок под свой процессор.
 - [Command Line Tools](https://developer.apple.com/xcode/resources/): `xcode-select --install`
 
 Скрипт собирает Intel и Apple Silicon в один `Utka.app`. Если какая-то архитектура на этой машине не собралась, скрипт напишет «сборка … пропущена». Тогда на Маке другого типа понадобится Rosetta.
