@@ -31,7 +31,7 @@ enum IslandBar {
     }
 }
 private enum SettingsPage: Int, CaseIterable {
-    case theme, sections, sound, search, shot, clipboard, pins, translate, updates
+    case theme, sections, sound, search, shot, clipboard, calendar, translate, updates
 
     var title: String {
         switch self {
@@ -41,7 +41,7 @@ private enum SettingsPage: Int, CaseIterable {
         case .search: return "Поиск"
         case .shot: return "Полка"
         case .clipboard: return "Буфер"
-        case .pins: return "Закрепы"
+        case .calendar: return "Календарь"
         case .translate: return "Перевод"
         case .updates: return "Обновления"
         }
@@ -132,9 +132,9 @@ final class SettingsPanel: NSObject {
     private let clipReboot = SwitchRow("Чистить после перезагрузки Мака")
     /// Окно «Убрать / Оставить» перед «Очистить».
     private let clipConfirm = SwitchRow("Спрашивать перед очисткой")
-    /// Крякер — напоминатель по заметкам. Страница «Закрепы».
+    /// Крякер — напоминатель заметок календаря. Страница «Календарь».
     private let quackSwitch = SwitchRow("Крякер")
-    private let quackCaption = caption("Напоминатель по заметкам: крякает, пока не откроешь заметку или не снимешь будильник.")
+    private let quackCaption = caption("Крякает, когда у заметки календаря наступило время, пока её не откроешь.")
     private let quackRepeat = SwitchRow("Повторять кряк")
     private let quackThrough = UtkaChrome.label("через", size: 13, weight: .semibold)
     private let quackAge = NSTextField()
@@ -444,11 +444,11 @@ final class SettingsPanel: NSObject {
         let age = clipboard && clipExpire.toggle.state == .on
         clipAge.isHidden = !age
         clipAgeUnit.isHidden = !age
-        let pins = page == .pins
-        quackSwitch.label.isHidden = !pins
-        quackSwitch.toggle.isHidden = !pins
-        quackCaption.isHidden = !pins
-        let quackOn = pins && quackSwitch.toggle.state == .on
+        let calendarPage = page == .calendar
+        quackSwitch.label.isHidden = !calendarPage
+        quackSwitch.toggle.isHidden = !calendarPage
+        quackCaption.isHidden = !calendarPage
+        let quackOn = calendarPage && quackSwitch.toggle.state == .on
         quackRepeat.label.isHidden = !quackOn
         quackRepeat.toggle.isHidden = !quackOn
         let repeatOn = quackOn && quackRepeat.toggle.state == .on
@@ -658,7 +658,7 @@ final class SettingsPanel: NSObject {
         clipAgeUnit.selectedSegment = clipPrefs.ageUnit.rawValue
     }
 
-    /// Тумблер крякера: пишет сразу, кнопки будильника и ReminderEngine подхватывают.
+    /// Тумблер крякера: пишет сразу, ReminderEngine подхватывает.
     @objc private func quackerToggled() {
         QuackerPrefs.enabled = quackSwitch.toggle.state == .on
         applyPageVisibility()
@@ -687,7 +687,7 @@ final class SettingsPanel: NSObject {
         QuackerPrefs.intervalUnit = unit
     }
 
-    /// Ставит страницу «Закрепы» по сохранённым настройкам.
+    /// Ставит страницу «Календарь» по сохранённым настройкам.
     private func refreshQuacker() {
         quackSwitch.toggle.state = QuackerPrefs.enabled ? .on : .off
         quackRepeat.toggle.state = QuackerPrefs.repeats ? .on : .off
@@ -908,8 +908,8 @@ final class SettingsPanel: NSObject {
             y = layoutShot(text: text, y: y)
         case .clipboard:
             y = layoutClipboard(text: text, y: y)
-        case .pins:
-            y = layoutPins(text: text, y: y)
+        case .calendar:
+            y = layoutCalendar(text: text, y: y)
         }
         let sideBottom = pinUpdates(x: sideX, above: above, width: sideW, pageBottom: y)
         pourPill()
@@ -1512,7 +1512,7 @@ final class SettingsPanel: NSObject {
     }
 
     /// Крякер, повтор и интервал «через».
-    private func layoutPins(text: NSRect, y: CGFloat) -> CGFloat {
+    private func layoutCalendar(text: NSRect, y: CGFloat) -> CGFloat {
         var y = layoutToggle(quackSwitch.label, quackSwitch.toggle, text: text, y: y) + 8
         let captionHeight = fieldHeight(quackCaption, width: text.width)
         quackCaption.frame = NSRect(x: text.minX, y: y, width: text.width, height: captionHeight)

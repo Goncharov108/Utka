@@ -6,7 +6,7 @@ enum QuackerPrefs {
     enum Unit: Int, CaseIterable {
         case seconds, minutes
 
-        /// Подпись у сегментов на странице «Закрепы».
+        /// Подпись у сегментов на странице «Календарь».
         var title: String {
             switch self {
             case .seconds: return "секунд"
@@ -33,7 +33,7 @@ enum QuackerPrefs {
     /// Допустимое число единиц интервала.
     static let countRange = 1...999
 
-    /// Крякер включён. Без ключа — да, как раньше: будильник у заметок был всегда.
+    /// Крякер включён. Без ключа — да.
     static var enabled: Bool {
         get {
             guard UserDefaults.standard.object(forKey: Key.enabled.rawValue) != nil else { return true }
@@ -87,341 +87,114 @@ enum QuackerPrefs {
         TimeInterval(intervalCount) * intervalUnit.seconds
     }
 
-    /// Крякер или интервал сменили — кнопки будильника и ReminderEngine подтягиваются.
+    /// Крякер или интервал сменили — ReminderEngine подтягивается.
     static let changed = Notification.Name("QuackerPrefsChanged")
 }
 
-/// «Сегодня в 14:30» или «1 окт в 14:30» — коротко, под строку заметки.
-func alarmLabel(_ date: Date) -> String {
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "ru_RU")
-    if Calendar.current.isDateInToday(date) {
-        formatter.dateFormat = "сегодня в HH:mm"
-    } else if Calendar.current.isDateInTomorrow(date) {
-        formatter.dateFormat = "завтра в HH:mm"
-    } else {
-        formatter.dateFormat = "d MMM в HH:mm"
-    }
-    return formatter.string(from: date)
-}
+/// Часы или минуты: при входе выделяет всё, принимает только цифры.
+final class ClockField: NSTextField, NSTextFieldDelegate {
+    private let maxValue: Int
 
-/// Всплывающий выбор даты и времени для будильника заметки.
-/// Один и тот же попап годится и для новой заметки, и для правки существующей.
-///
-/// Календарь и часы в одном узком виджете (.clockAndCalendar с обоими
-/// элементами) не помещались — пропадала шапка с месяцем и подсветка
-/// сегодняшнего дня. Снизу одна строка: часы, минуты и плюс.
-/// Поле часов/минут: при входе выделяет всё (новая цифра заменяет старые),
-/// принимает только две цифры.
-private final class ClockField: NSTextField {
+    init(max: Int) {
+        maxValue = max
+        super.init(frame: .zero)
+        delegate = self
+        cell?.wraps = false
+        cell?.isScrollable = true
+        usesSingleLineMode = true
+        lineBreakMode = .byClipping
+        isEditable = true
+        isSelectable = true
+        isBordered = false
+        isBezeled = false
+        drawsBackground = false
+        focusRingType = .none
+        alignment = .center
+        tint()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    /// Ставит две цифры. Кривое значение при сохранении не примется.
+    func show(_ value: Int) {
+        let clamped = min(max(0, value), maxValue)
+        stringValue = String(format: "%02d", clamped)
+        tint()
+    }
+
+    /// Чернила и гротеск под текущую тему, цифры не трогает.
+    func tint() {
+        textColor = UtkaChrome.ink
+        font = UtkaChrome.font(15, weight: .medium)
+    }
+
+    /// Число в диапазоне, иначе nil. Ноль допустим.
+    func clockNumber() -> Int? {
+        let typed = Int(stringValue.trimmingCharacters(in: .whitespaces))
+        guard let typed, (0...maxValue).contains(typed) else { return nil }
+        return typed
+    }
+
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
         if ok { DispatchQueue.main.async { [weak self] in self?.currentEditor()?.selectAll(nil) } }
         return ok
     }
-}
-
-final class AlarmPopover: NSObject, NSPopoverDelegate, NSTextFieldDelegate {
-    private let popover = NSPopover()
-    private let calendarPicker = NSDatePicker()
-    private let hourField = ClockField()
-    private let minuteField = ClockField()
-    private let hourStepper = NSStepper()
-    private let minuteStepper = NSStepper()
-    private var fallbackHour = 0
-    private var fallbackMinute = 0
-    private var onPick: ((Date?) -> Void)?
-    /// true, пока попап открыт. Курсор на поле времени часто уходит ниже
-    /// границ островка, и жест наведения принял бы это за уход мыши —
-    /// подписчик (панель заготовок) на это время держит островок открытым.
-    var onPresenting: ((Bool) -> Void)?
-
-    /// view — якорь попапа. initial — текущая дата будильника, если уже стоит.
-    func show(from view: NSView, initial: Date?, onPick: @escaping (Date?) -> Void) {
-        self.onPick = onPick
-        let initialDate = initial ?? Date().addingTimeInterval(600)
-        let canClear = initial != nil
-
-        let parts = Calendar.current.dateComponents([.hour, .minute], from: initialDate)
-        fallbackHour = parts.hour ?? 0
-        fallbackMinute = parts.minute ?? 0
-        prepareCalendar(initialDate)
-        styleClock(hourField, fallbackHour)
-        styleClock(minuteField, fallbackMinute)
-
-        let pad: CGFloat = 12
-        let gap: CGFloat = 12
-        let rowH: CGFloat = 26
-        // Сетка дней не растягивается: строка времени ровно по её ширине.
-        let calSize = calendarPicker.fittingSize
-        // Строка времени (цифры, стрелки, «снять», плюс) не должна быть уже самой себя.
-        let font = UtkaChrome.font(13, weight: .medium)
-        let clearW = canClear ? ceil(("снять" as NSString).size(withAttributes: [.font: font]).width) + 16 : 0
-        let colonEstimate: CGFloat = 12
-        let rowNeeded = clockDigitWidth() * 2 + colonEstimate + 6 + 14 + 4 + 14 + 10 + clearW + 10 + rowH
-        let contentW = max(ceil(calSize.width), ceil(rowNeeded))
-        let width = contentW + pad * 2
-        let height = pad + calSize.height + gap + rowH + pad
-
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        let calendarY = height - pad - calSize.height
-        calendarPicker.frame = NSRect(x: pad + (contentW - calSize.width) / 2, y: calendarY, width: calSize.width, height: calSize.height)
-        root.addSubview(calendarPicker)
-        placeClockRow(in: root, x: pad, y: pad, width: contentW, height: rowH, canClear: canClear)
-
-        let controller = NSViewController()
-        controller.view = root
-        popover.contentViewController = controller
-        popover.behavior = .transient
-        popover.delegate = self
-        onPresenting?(true)
-        popover.show(relativeTo: view.bounds, of: view, preferredEdge: .maxY)
-    }
-
-    /// Календарь без системной обводки и focus ring — иначе синяя «рамка в рамке».
-    private func prepareCalendar(_ date: Date) {
-        calendarPicker.datePickerStyle = .clockAndCalendar
-        calendarPicker.datePickerElements = [.yearMonthDay]
-        calendarPicker.datePickerMode = .single
-        calendarPicker.minDate = Calendar.current.startOfDay(for: Date())
-        calendarPicker.dateValue = date
-        calendarPicker.isBordered = false
-        calendarPicker.drawsBackground = false
-        calendarPicker.focusRingType = .none
-        if let cell = calendarPicker.cell as? NSDatePickerCell {
-            cell.drawsBackground = false
-            cell.backgroundColor = .clear
-        }
-        // У части сборок macOS обводка остаётся на слое ячейки — гасим явно.
-        calendarPicker.wantsLayer = true
-        calendarPicker.layer?.borderWidth = 0
-        calendarPicker.layer?.borderColor = NSColor.clear.cgColor
-        calendarPicker.sizeToFit()
-    }
-
-    /// Две цифры без рамки и без синей подсветки системного пикера.
-    private func styleClock(_ field: NSTextField, _ value: Int) {
-        field.delegate = self
-        // Одна строка без переноса: иначе вторая цифра уезжает под первую.
-        field.cell?.wraps = false
-        field.cell?.isScrollable = true
-        field.usesSingleLineMode = true
-        field.lineBreakMode = .byClipping
-        field.isEditable = true
-        field.isSelectable = true
-        field.isBordered = false
-        field.isBezeled = false
-        field.drawsBackground = false
-        field.focusRingType = .none
-        field.font = UtkaChrome.font(17, weight: .medium)
-        field.textColor = UtkaChrome.ink
-        field.alignment = .center
-        field.stringValue = String(format: "%02d", value)
-    }
-
-    /// Одна строка на ширину календаря: цифры слева, плюс в конце.
-    private func placeClockRow(in root: NSView, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, canClear: Bool) {
-        let digitW = clockDigitWidth()
-        let digitH = ceil(hourField.fittingSize.height)
-        let colon = UtkaChrome.label(":", size: 17, weight: .medium)
-        colon.sizeToFit()
-        let colonW = ceil(colon.fittingSize.width)
-        let mid = y + (height - digitH) / 2
-
-        hourField.frame = NSRect(x: x, y: mid, width: digitW, height: digitH)
-        colon.frame = NSRect(x: x + digitW, y: mid, width: colonW, height: digitH)
-        minuteField.frame = NSRect(x: x + digitW + colonW, y: mid, width: digitW, height: digitH)
-        root.addSubview(hourField)
-        root.addSubview(colon)
-        root.addSubview(minuteField)
-
-        // Стрелки вверх/вниз у каждого поля, как в системном выборе времени.
-        configure(hourStepper, field: hourField, max: 23)
-        configure(minuteStepper, field: minuteField, max: 59)
-        let stepW: CGFloat = 14
-        let stepH: CGFloat = 22
-        hourStepper.frame = NSRect(x: minuteField.frame.maxX + 6, y: y + (height - stepH) / 2, width: stepW, height: stepH)
-        minuteStepper.frame = NSRect(x: hourStepper.frame.maxX + 4, y: y + (height - stepH) / 2, width: stepW, height: stepH)
-        root.addSubview(hourStepper)
-        root.addSubview(minuteStepper)
-
-        let plus = makePlusButton()
-        plus.frame = NSRect(x: x + width - height, y: y, width: height, height: height)
-        root.addSubview(plus)
-
-        guard canClear else { return }
-        let clear = makeClearButton()
-        let clearW = ceil(clear.fittingSize.width)
-        clear.frame = NSRect(
-            x: plus.frame.minX - 8 - clearW,
-            y: y + (height - clear.fittingSize.height) / 2,
-            width: clearW,
-            height: ceil(clear.fittingSize.height)
-        )
-        root.addSubview(clear)
-    }
-
-    private func configure(_ stepper: NSStepper, field: NSTextField, max: Int) {
-        stepper.minValue = 0
-        stepper.maxValue = Double(max)
-        stepper.increment = 1
-        stepper.valueWraps = true
-        stepper.integerValue = Int(field.stringValue) ?? 0
-        stepper.target = self
-        stepper.action = #selector(stepperChanged(_:))
-    }
-
-    @objc private func stepperChanged(_ sender: NSStepper) {
-        let field = sender === hourStepper ? hourField : minuteField
-        field.stringValue = String(format: "%02d", sender.integerValue)
-    }
-
-    /// Ширина двух цифр текущим шрифтом часов.
-    private func clockDigitWidth() -> CGFloat {
-        let font = hourField.font ?? UtkaChrome.font(17, weight: .medium)
-        let measured = ("00" as NSString).size(withAttributes: [.font: font]).width
-        return ceil(measured) + 14
-    }
-
-    /// Плюс, как у новой заметки. Он и ставит будильник.
-    private func makePlusButton() -> NSButton {
-        let button = NSButton()
-        button.title = ""
-        button.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Поставить")?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
-        button.imagePosition = .imageOnly
-        button.bezelStyle = .circular
-        button.contentTintColor = UtkaChrome.ink
-        button.target = self
-        button.action = #selector(setTapped)
-        button.toolTip = "Поставить"
-        return button
-    }
-
-    /// Короткое «снять» между временем и плюсом, если будильник уже стоит.
-    private func makeClearButton() -> NSButton {
-        let button = NSButton(title: "снять", target: self, action: #selector(clearTapped))
-        button.isBordered = false
-        button.font = UtkaChrome.font(13, weight: .medium)
-        button.contentTintColor = UtkaChrome.dim
-        let title = NSAttributedString(
-            string: "снять",
-            attributes: [
-                .font: UtkaChrome.font(13, weight: .medium),
-                .foregroundColor: UtkaChrome.dim
-            ]
-        )
-        button.attributedTitle = title
-        return button
-    }
 
     func controlTextDidChange(_ obj: Notification) {
-        guard let field = obj.object as? NSTextField else { return }
-        let digits = field.stringValue.filter { $0.isASCII && $0.isNumber }
+        let digits = stringValue.filter { $0.isASCII && $0.isNumber }
         let trimmed = String(digits.suffix(2))
-        if trimmed != field.stringValue { field.stringValue = trimmed }
-        if let value = Int(trimmed) {
-            (field === hourField ? hourStepper : minuteStepper).integerValue = value
-        }
-    }
-
-    /// Return в поле времени ставит будильник.
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-        guard selector == #selector(NSResponder.insertNewline(_:)) else { return false }
-        setTapped()
-        return true
-    }
-
-    func popoverDidClose(_ notification: Notification) {
-        onPresenting?(false)
-    }
-
-    /// День берём с календаря, час и минуту — с двух полей. Пустое и кривое не принимаем.
-    private var combinedDate: Date? {
-        guard let hour = strictClock(hourField, max: 23), let minute = strictClock(minuteField, max: 59) else {
-            return nil
-        }
-        return Calendar.current.date(
-            bySettingHour: hour,
-            minute: minute,
-            second: 0,
-            of: calendarPicker.dateValue
-        ) ?? calendarPicker.dateValue
-    }
-
-    /// Число в диапазоне, иначе nil. Ноль для часа и минуты допустим.
-    private func strictClock(_ field: NSTextField, max: Int) -> Int? {
-        let typed = Int(field.stringValue.trimmingCharacters(in: .whitespaces))
-        guard let typed, (0...max).contains(typed) else { return nil }
-        return typed
-    }
-
-    // Сначала закрыть попап и только потом применить выбор: onPick обычно
-    // меняет модель и сразу перестраивает список заметок, снимая со
-    // экрана ту самую строку, к которой попап был приколот. Если это
-    // происходит раньше закрытия, попап остаётся «висеть» без якоря и
-    // не сообщает через onPresenting, что открытие закончилось — островок
-    // потом никогда не закрывается сам.
-    @objc private func setTapped() {
-        guard let picked = combinedDate else {
-            styleClock(hourField, fallbackHour)
-            styleClock(minuteField, fallbackMinute)
-            return
-        }
-        popover.performClose(nil)
-        onPresenting?(false)
-        onPick?(picked)
-    }
-
-    @objc private func clearTapped() {
-        popover.performClose(nil)
-        onPresenting?(false)
-        onPick?(nil)
+        if trimmed != stringValue { stringValue = trimmed }
     }
 }
 
-/// Следит за будильниками у заметок и крякает, когда срок наступил.
-/// Если Мак спал или был выключен — напоминает сразу при пробуждении,
-/// а не молчит задним числом: проверка идёт по факту «время уже прошло»,
-/// без разницы, насколько именно прошло.
+/// Крякает по заметке календаря, когда её время наступило.
+/// Если Мак спал — напоминает сразу при пробуждении: проверка смотрит, что срок уже прошёл.
 final class ReminderEngine {
     /// Меняется, когда начинает или перестаёт кричать очередная заметка.
     var onRingingChanged: ((String?) -> Void)?
 
     private(set) var ringingID: String?
-    private let model: PresetsModel
+    private let calendar: CalendarModel
     private var checkTimer: Timer?
     private var quackTimer: Timer?
 
-    init(model: PresetsModel) {
-        self.model = model
+    init(calendar: CalendarModel) {
+        self.calendar = calendar
     }
 
     func start() {
-        let timer = Timer(timeInterval: 15, repeats: true) { [weak self] _ in self?.check() }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.check() }
         RunLoop.main.add(timer, forMode: .common)
         checkTimer = timer
         NSWorkspace.shared.notificationCenter.addObserver(
-            self, selector: #selector(wokeUp), name: NSWorkspace.didWakeNotification, object: nil
+            self, selector: #selector(recheck), name: NSWorkspace.didWakeNotification, object: nil
         )
         NotificationCenter.default.addObserver(
             self, selector: #selector(prefsChanged), name: QuackerPrefs.changed, object: nil
         )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(recheck), name: CalendarModel.changed, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(recheck), name: IslandSection.orderChanged, object: nil
+        )
         check()
     }
 
-    @objc private func wokeUp() {
+    /// Раздел спрятан — кряк жив. Снят из библиотеки — молчит, файл заметок не трогаем.
+    private func calendarInstalled() -> Bool {
+        SectionBoard.order.contains { $0.id == "calendar" }
+    }
+
+    @objc private func recheck() {
         check()
     }
 
     /// Выключили крякер или сменили интервал — сразу пересчитать.
     @objc private func prefsChanged() {
         if !QuackerPrefs.enabled {
-            if ringingID != nil {
-                ringingID = nil
-                onRingingChanged?(nil)
-                stopQuacking()
-            }
+            silence()
             return
         }
         if ringingID != nil {
@@ -431,21 +204,18 @@ final class ReminderEngine {
         }
     }
 
-    /// Заметка с ближайшим наступившим и ещё не открытым будильником, если есть.
-    private func due(_ now: Date) -> Preset? {
-        model.texts
-            .filter { ($0.dueAt.map { $0 <= now } ?? false) && $0.alarmAcknowledged != true }
-            .sorted { ($0.dueAt ?? .distantFuture) < ($1.dueAt ?? .distantFuture) }
+    /// Ближайшая заметка с «Крякнуть», срок которой уже наступил и её ещё не открывали.
+    private func due(_ now: Date) -> CalendarNote? {
+        guard QuackerPrefs.enabled, calendarInstalled() else { return nil }
+        return calendar.notes
+            .filter { $0.quack && !$0.acknowledged && $0.at <= now }
+            .sorted { $0.at < $1.at }
             .first
     }
 
     private func check() {
-        guard QuackerPrefs.enabled else {
-            if ringingID != nil {
-                ringingID = nil
-                onRingingChanged?(nil)
-                stopQuacking()
-            }
+        guard QuackerPrefs.enabled, calendarInstalled() else {
+            silence()
             return
         }
         let next = due(Date())
@@ -455,25 +225,26 @@ final class ReminderEngine {
             onRingingChanged?(next.id)
             startQuacking()
         } else if ringingID != nil {
-            ringingID = nil
-            onRingingChanged?(nil)
-            stopQuacking()
+            silence()
         }
     }
 
-    /// Открыли заметку — крик прекращается, заметка помечается прочитанной.
+    /// Открыли заметку — крик прекращается.
     func acknowledge(id: String) {
-        model.acknowledgeAlarm(id: id)
-        guard ringingID == id else { return }
+        calendar.acknowledge(id: id)
+        check()
+    }
+
+    private func silence() {
+        guard ringingID != nil || quackTimer != nil else { return }
         ringingID = nil
         onRingingChanged?(nil)
         stopQuacking()
-        check()
     }
 
     /// Один раз крякнуть. Если повтор включён — дальше с интервалом, пока заметку не откроют.
     private func startQuacking() {
-        guard QuackerPrefs.enabled else {
+        guard QuackerPrefs.enabled, calendarInstalled() else {
             stopQuacking()
             return
         }
@@ -495,9 +266,9 @@ final class ReminderEngine {
 
     /// Играет напрямую в физические колонки Мака — не в «Утка звук» и не
     /// туда, куда сейчас ведёт системный выход (наушники, Bluetooth и т.д.).
-    /// Будильник обязан быть услышан, а не замолчать из-за выбранного выхода.
+    /// Кряк обязан быть услышан, а не замолчать из-за выбранного выхода.
     private func quack() {
-        guard QuackerPrefs.enabled else { return }
+        guard QuackerPrefs.enabled, calendarInstalled() else { return }
         if let url = Bundle.main.url(forResource: "quack", withExtension: "mp3") {
             AudioOutput.shared.playThroughSpeakers(url)
             return
@@ -508,3 +279,4 @@ final class ReminderEngine {
         }
     }
 }
+

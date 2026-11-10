@@ -7,10 +7,10 @@ struct Preset: Codable, Equatable {
     var body: String?
     var bookmark: String?
     var path: String?
-    /// Будильник у заметки: когда напомнить. Только у текстовых записей.
-    var dueAt: Date?
-    /// true — будильник уже открывали, крякать заново не нужно, пока дата не сменится.
-    var alarmAcknowledged: Bool?
+    /// Старый будильник в файле. Утка его не показывает и не звонит.
+    var dueAt: Date? = nil
+    /// Старая пометка «уже открывали». В файле остаётся, на кряк не влияет.
+    var alarmAcknowledged: Bool? = nil
 }
 
 /// Постоянные фразы и файлы. Удаление снимает только запись.
@@ -37,9 +37,8 @@ final class PresetsModel {
     var texts: [Preset] { items.filter { $0.kind == "text" } }
     var files: [Preset] { items.filter { $0.kind == "file" } }
 
-    func addText(title: String, body: String, dueAt: Date? = nil) {
-        let alarm = QuackerPrefs.enabled ? dueAt : nil
-        items.insert(Preset(id: UUID().uuidString, kind: "text", title: title, body: body, bookmark: nil, path: nil, dueAt: alarm, alarmAcknowledged: nil), at: 0)
+    func addText(title: String, body: String) {
+        items.insert(Preset(id: UUID().uuidString, kind: "text", title: title, body: body, bookmark: nil, path: nil), at: 0)
         save()
         onChange?()
     }
@@ -109,31 +108,12 @@ final class PresetsModel {
         }
     }
 
-    /// Будильник у заметки. nil — снять. Смена даты сбрасывает «уже открывали».
-    /// При выключенном крякере новые даты не ставятся; старые dueAt в файле не трогаем.
-    /// Правка текста заметки. Будильник, порядок и место в списке не трогает.
+    /// Правка текста заметки. Порядок и место в списке не трогает.
     func updateText(id: String, title: String, body: String) {
         guard let index = items.firstIndex(where: { $0.id == id && $0.kind == "text" }) else { return }
         guard items[index].title != title || items[index].body != body else { return }
         items[index].title = title
         items[index].body = body
-        save()
-        onChange?()
-    }
-
-    func setAlarm(id: String, date: Date?) {
-        guard QuackerPrefs.enabled || date == nil else { return }
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
-        items[index].dueAt = date
-        items[index].alarmAcknowledged = nil
-        save()
-        onChange?()
-    }
-
-    /// Крик утки прекращается, заметка открыта — больше не кричит, пока дату не сменят.
-    func acknowledgeAlarm(id: String) {
-        guard let index = items.firstIndex(where: { $0.id == id }), items[index].alarmAcknowledged != true else { return }
-        items[index].alarmAcknowledged = true
         save()
         onChange?()
     }
@@ -180,12 +160,6 @@ private enum PresetsTab: Int {
 final class PresetsView: NSView {
     var onDrag: ((Bool) -> Void)?
     var copyText: (String) -> Void = { _ in }
-    /// Сработавшую заметку открыли — пора остановить кряканье.
-    var onAlarmOpened: ((String) -> Void)?
-    /// id заметки, у которой сейчас кричит будильник. Красит её строку.
-    var ringingID: String? {
-        didSet { guard ringingID != oldValue else { return }; rebuild() }
-    }
 
     private let model: PresetsModel
     private let tabControl = NSSegmentedControl()
@@ -197,9 +171,6 @@ final class PresetsView: NSView {
     private let titleField = NSTextField()
     private let bodyField = NSTextField()
     private let addButton = NSButton()
-    private let alarmButton = NSButton()
-    private let alarmPopover = AlarmPopover()
-    private var pendingAlarmDate: Date?
     private var rows: [TextRowView] = []
     private var expanded: Set<String> = []
     private var tab: PresetsTab = .notes
@@ -241,7 +212,6 @@ final class PresetsView: NSView {
         addButton.contentTintColor = UtkaChrome.ink
         addButton.target = self
         addButton.action = #selector(addText)
-        styleAlarmButton()
         addSubview(tabControl)
         addSubview(fileGrid)
         addSubview(textScroll)
@@ -249,22 +219,11 @@ final class PresetsView: NSView {
         addSubview(errorLabel)
         addSubview(titleField)
         addSubview(bodyField)
-        addSubview(alarmButton)
         addSubview(addButton)
         registerForDraggedTypes([.fileURL])
         model.onChange = { [weak self] in self?.modelChanged() }
         NotificationCenter.default.addObserver(self, selector: #selector(retintPresets), name: IslandLook.changed, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(quackerChanged), name: QuackerPrefs.changed, object: nil)
         rebuild()
-    }
-
-    /// Крякер выключили — кнопку в форме новой заметки убрать.
-    @objc private func quackerChanged() {
-        if !QuackerPrefs.enabled {
-            pendingAlarmDate = nil
-            updateAlarmButton()
-        }
-        applyLayout()
     }
 
     /// Поля и подписи заготовок под текущий вид.
@@ -274,48 +233,12 @@ final class PresetsView: NSView {
         addButton.contentTintColor = UtkaChrome.ink
         emptyLabel.textColor = UtkaChrome.dim
         errorLabel.textColor = UtkaChrome.dim
-        updateAlarmButton()
-    }
-
-    /// Кнопка-будильник для новой заметки: пусто, пока дата не выбрана.
-    private func styleAlarmButton() {
-        alarmButton.title = ""
-        alarmButton.imagePosition = .imageOnly
-        alarmButton.bezelStyle = .circular
-        alarmButton.target = self
-        alarmButton.action = #selector(alarmTapped)
-        updateAlarmButton()
-    }
-
-    private func updateAlarmButton() {
-        let symbol = pendingAlarmDate == nil ? "calendar" : "calendar.badge.clock"
-        alarmButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Будильник")?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
-        alarmButton.contentTintColor = pendingAlarmDate == nil ? UtkaChrome.dim : UtkaChrome.ink
-        alarmButton.toolTip = pendingAlarmDate.map { "Напомнить \(alarmLabel($0))" } ?? "Поставить будильник к заметке"
-    }
-
-    @objc private func alarmTapped() {
-        alarmPopover.onPresenting = { [weak self] active in self?.onDrag?(active) }
-        alarmPopover.show(from: alarmButton, initial: pendingAlarmDate) { [weak self] date in
-            self?.pendingAlarmDate = date
-            self?.updateAlarmButton()
-        }
     }
 
     required init?(coder: NSCoder) { nil }
 
     func refresh() {
         model.reloadIfExternal()
-    }
-
-    /// Переключает на вкладку «Заметки» и раскрывает именно эту запись — так будильник
-    /// находит свою заметку, когда по нему кликнули из строки меню.
-    func openNote(id: String) {
-        tab = .notes
-        tabControl.selectedSegment = tab.rawValue
-        expanded = [id]
-        rebuild()
     }
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
@@ -340,7 +263,6 @@ final class PresetsView: NSView {
         titleField.isHidden = !showNotes
         bodyField.isHidden = !showNotes
         addButton.isHidden = !showNotes
-        alarmButton.isHidden = !showNotes || !QuackerPrefs.enabled
         errorLabel.isHidden = !showNotes
 
         if focus {
@@ -351,20 +273,14 @@ final class PresetsView: NSView {
             let formY: CGFloat = 4
             let formH: CGFloat = 26
             let plus: CGFloat = 26
-            let showAlarm = QuackerPrefs.enabled
-            alarmButton.isHidden = !showAlarm
-            let alarmSlots: CGFloat = showAlarm ? 2 : 1
-            let titleW = min(140, max(72, (bounds.width - plus * alarmSlots - 24) * 0.34))
+            let titleW = min(140, max(72, (bounds.width - plus - 24) * 0.34))
             titleField.frame = NSRect(x: 0, y: formY, width: titleW, height: formH)
             bodyField.frame = NSRect(
                 x: titleW + 8,
                 y: formY,
-                width: max(40, bounds.width - titleW - plus * alarmSlots - 24),
+                width: max(40, bounds.width - titleW - plus - 24),
                 height: formH
             )
-            if showAlarm {
-                alarmButton.frame = NSRect(x: bounds.width - plus * 2 - 8, y: formY, width: plus, height: formH)
-            }
             addButton.frame = NSRect(x: bounds.width - plus, y: formY, width: plus, height: formH)
             errorLabel.frame = NSRect(x: 0, y: formY + formH + 2, width: bounds.width - plus - 8, height: 14)
             let textY = formY + formH + 18
@@ -430,20 +346,15 @@ final class PresetsView: NSView {
             row.show(
                 title: preset.title,
                 detail: oneLine(preset.body ?? ""),
-                body: preset.body ?? "",
-                dueAt: preset.dueAt,
-                ringing: preset.id == self.ringingID
+                body: preset.body ?? ""
             )
-            row.onAlarmPicked = { [weak self] date in self?.model.setAlarm(id: preset.id, date: date) }
             row.onEdited = { [weak self] title, body in
                 let name = title.isEmpty ? oneLine(body, limit: 32) : title
                 self?.model.updateText(id: preset.id, title: name, body: body)
             }
             row.onEditEnded = { [weak self] in self?.rebuildIfPending() }
             row.onClick = { [weak self] in
-                guard let self else { return }
-                if preset.id == self.ringingID { self.onAlarmOpened?(preset.id) }
-                guard let body = preset.body else { return }
+                guard let self, let body = preset.body else { return }
                 self.copyText(body)
             }
             row.onCopySelection = { [weak self] piece in self?.copyText(piece) }
@@ -454,7 +365,6 @@ final class PresetsView: NSView {
                 self.expanded = open ? [preset.id] : []
                 self.rows.forEach { $0.isExpanded = false }
                 row.isExpanded = open
-                if open, preset.id == self.ringingID { self.onAlarmOpened?(preset.id) }
                 self.applyLayout()
             }
             row.onDelete = { [weak self] in self?.askRemove(preset) }
@@ -589,11 +499,9 @@ final class PresetsView: NSView {
         let body = bodyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return }
         let title = titleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        model.addText(title: title.isEmpty ? oneLine(body, limit: 32) : title, body: body, dueAt: pendingAlarmDate)
+        model.addText(title: title.isEmpty ? oneLine(body, limit: 32) : title, body: body)
         titleField.stringValue = ""
         bodyField.stringValue = ""
-        pendingAlarmDate = nil
-        updateAlarmButton()
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }

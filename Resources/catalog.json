@@ -8,5 +8,10 @@
     "id": "pulse",
     "title": "Пульс",
     "symbol": "waveform.path.ecg"
+  },
+  {
+    "id": "calendar",
+    "title": "Календарь",
+    "symbol": "calendar"
   }
 ]

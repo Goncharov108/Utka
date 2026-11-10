@@ -768,6 +768,11 @@ final class IslandPanel {
     /// Столбец значков. Утка настроек стоит рядом и не едет вместе с ним.
     private let railColumn = SectionRailColumn()
     private var bodies: [String: NSView] = [:]
+    private let calendarModel: CalendarModel
+    private var ringingNoteID: String?
+    private var calendarRinging = false
+    private var pulseTimer: Timer?
+    private var pulsePhase = 0.0
     private var railButtons: [SectionRailButton] = []
     private var buttonTargets: [String: NSRect] = [:]
     private var buttonMotion: Timer?
@@ -784,6 +789,10 @@ final class IslandPanel {
     var onSection: ((IslandSection) -> Void)?
     var onCapture: (() -> Void)?
     var onSettings: (() -> Void)?
+    /// Пока на экране вопрос календаря, жест наведения островок не прячет.
+    var onHold: ((Bool) -> Void)?
+    /// Открыли заметку календаря — кряк пора унять.
+    var onCalendarOpened: ((String) -> Void)?
 
     /// Подтягивает каплю, разделы и полосу под сохранённый вид.
     func applyLook() {
@@ -847,7 +856,8 @@ final class IslandPanel {
         placeSourceDrop()
     }
 
-    init(shelf: NSView, clipboard: NSView, presets: NSView, translator: NSView, mark: NSImage?) {
+    init(shelf: NSView, clipboard: NSView, presets: NSView, translator: NSView, calendar: CalendarModel, mark: NSImage?) {
+        calendarModel = calendar
         bodies = [
             IslandSection.shelf.slotID: shelf,
             IslandSection.clipboard.slotID: clipboard,
@@ -1184,6 +1194,7 @@ final class IslandPanel {
         body.addSubview(view)
         if let note = view as? NotepadIslandView { note.focusText() }
         if let pulse = view as? PulseIslandView { pulse.setActive(true) }
+        if let calendar = view as? CalendarIslandView { calendar.ringingID = ringingNoteID }
         for button in railButtons {
             let on = button.slotID == id
             button.contentTintColor = on ? IslandLook.accent : UtkaChrome.dim
@@ -1191,11 +1202,12 @@ final class IslandPanel {
         railColumn.reveal(buttonTargets[id], animated: true)
     }
 
-    /// Тело ядра уже собрано. Блокнот и Пульс — свои поля. Остальные разделы библиотеки — тихая карточка.
+    /// Тело ядра уже собрано. Блокнот, Пульс и Календарь — свои поля. Остальные разделы библиотеки — тихая карточка.
     private func viewFor(_ id: String) -> NSView {
         if let core = bodies[id], IslandSection(slotID: id) != nil { return core }
         if id == "notepad" { return notepadView() }
         if id == "pulse" { return pulseView() }
+        if id == "calendar" { return calendarView() }
         let title = SectionBoard.order.first { $0.id == id }?.listTitle ?? id
         if let card = bodies[id] as? LibrarySectionBody {
             card.setTitle(title)
@@ -1223,6 +1235,64 @@ final class IslandPanel {
         let view = PulseIslandView()
         bodies["pulse"] = view
         return view
+    }
+
+    /// Раздел «Календарь». Черновик редактора живёт, пока утка открыта.
+    private func calendarView() -> CalendarIslandView {
+        if let view = bodies["calendar"] as? CalendarIslandView { return view }
+        let view = CalendarIslandView(model: calendarModel)
+        view.ringingID = ringingNoteID
+        view.onOpened = { [weak self] id in self?.onCalendarOpened?(id) }
+        view.onHold = { [weak self] hold in self?.onHold?(hold) }
+        bodies["calendar"] = view
+        return view
+    }
+
+    /// Открывает календарь на заметке. Так кряк из меню находит свою строку.
+    func openCalendar(id: String) {
+        select(slotID: "calendar")
+        calendarView().open(id: id)
+    }
+
+    /// Значок «Календарь» на полосе мягко пульсирует, пока заметка крякает.
+    func setCalendarRinging(_ id: String?) {
+        ringingNoteID = id
+        (bodies["calendar"] as? CalendarIslandView)?.ringingID = id
+        if id != nil {
+            startCalendarPulse()
+        } else {
+            stopCalendarPulse()
+        }
+    }
+
+    private func startCalendarPulse() {
+        calendarRinging = true
+        guard pulseTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            self?.stepCalendarPulse()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        pulseTimer = timer
+    }
+
+    private func stopCalendarPulse() {
+        calendarRinging = false
+        pulseTimer?.invalidate()
+        pulseTimer = nil
+        pulsePhase = 0
+        railButtons.first { $0.slotID == "calendar" }?.alphaValue = 1
+    }
+
+    /// Волна прозрачности около двух секунд. Скрытый раздел не к чему пульсировать.
+    private func stepCalendarPulse() {
+        guard calendarRinging else {
+            stopCalendarPulse()
+            return
+        }
+        pulsePhase += .pi * 2 / (1.8 * 30)
+        let wave = (sin(pulsePhase) + 1) / 2
+        guard let button = railButtons.first(where: { $0.slotID == "calendar" }), !button.isHidden else { return }
+        button.alphaValue = 0.38 + 0.62 * wave
     }
 
     /// Значок файла летит к кнопке полки, затем файл встаёт на полку и полка открывается.

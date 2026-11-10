@@ -9,6 +9,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var shelf: ShelfModel!
     private var presets: PresetsModel!
     private var presetsView: PresetsView!
+    private var calendar: CalendarModel!
     private var reminder: ReminderEngine!
     private var statusItem: NSStatusItem!
     private var toggleItem: NSMenuItem!
@@ -34,19 +35,21 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         ShotEditor.shelf = shelf
         presets = PresetsModel(storeURL: support.appendingPathComponent("presets.json"))
+        calendar = CalendarModel(storeURL: support.appendingPathComponent("calendar.json"))
 
         let shelfView = ShelfView(model: shelf)
         let clipboardView = ClipboardView(history: history)
         presetsView = PresetsView(model: presets)
         presetsView.copyText = { [weak self] text in self?.history.copyToPasteboard(text) }
-        reminder = ReminderEngine(model: presets)
-        presetsView.onAlarmOpened = { [weak self] id in self?.reminder.acknowledge(id: id) }
+        reminder = ReminderEngine(calendar: calendar)
         let translator = TranslatorView()
         let mark = Bundle.main.url(forResource: "utka-mark", withExtension: "png").flatMap { NSImage(contentsOf: $0) }
 
         SectionBoard.reload()
         hover = HoverMonitor()
-        panel = IslandPanel(shelf: shelfView, clipboard: clipboardView, presets: presetsView, translator: translator, mark: mark)
+        panel = IslandPanel(shelf: shelfView, clipboard: clipboardView, presets: presetsView, translator: translator, calendar: calendar, mark: mark)
+        panel.onHold = { [weak self] active in self?.hover.suspended = active }
+        panel.onCalendarOpened = { [weak self] id in self?.reminder.acknowledge(id: id) }
         settings.onIslandBar = { [weak panel] in
             panel?.setBar()
         }
@@ -125,10 +128,13 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Утка кричит — мигает значком в строке меню и открывает пункт быстрого перехода.
     private func ringingChanged(_ id: String?) {
-        presetsView.ringingID = id
+        panel.setCalendarRinging(id)
         reminderItem.isHidden = id == nil
         reminderItem.title = id.flatMap { ringingID in
-            presets.texts.first { $0.id == ringingID }.map { "⏰ \($0.title) — показать" }
+            calendar.notes.first { $0.id == ringingID }.map { note in
+                let name = note.title.isEmpty ? oneLine(note.body, limit: 32) : note.title
+                return "⏰ \(name) — показать"
+            }
         } ?? ""
         blinkTimer?.invalidate()
         blinkTimer = nil
@@ -153,8 +159,7 @@ final class UtkaApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setEnabled(true)
         panel.show(on: screen)
         hover.markOpened(on: screen)
-        panel.select(slotID: IslandSection.presets.slotID)
-        presetsView.openNote(id: id)
+        panel.openCalendar(id: id)
         reminder.acknowledge(id: id)
     }
 
