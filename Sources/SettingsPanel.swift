@@ -114,6 +114,8 @@ final class SettingsPanel: NSObject {
     private let shotCleanup = NSSwitch()
     private let shotDisposalLabel = UtkaChrome.label("Удалять скрин из полки", size: 13)
     private let shotDisposal = NSSegmentedControl()
+    /// Угол страницы «Полка»: открывает папку временных копий.
+    private let outboxButton = NSButton()
     /// Настройки буфера. Страница «Буфер» пишет их сразу.
     private let clipPrefs = ClipboardPrefs()
     /// Главный выключатель истории буфера.
@@ -217,6 +219,15 @@ final class SettingsPanel: NSObject {
         shotCleanup.state = ShelfModel.deleteShotAfterUse ? .on : .off
         segments(shotDisposal, ShotDisposal.allCases.map(\.title), action: #selector(shotDisposalChanged))
         refreshShotDisposal()
+        outboxButton.isBordered = false
+        outboxButton.bezelStyle = .shadowlessSquare
+        outboxButton.imagePosition = .imageOnly
+        outboxButton.imageScaling = .scaleProportionallyDown
+        outboxButton.image = utkaSymbol("archivebox", point: 15, label: "Временные копии")
+        outboxButton.toolTip = "Временные копии"
+        outboxButton.target = self
+        outboxButton.action = #selector(openOutbox)
+        outboxButton.contentTintColor = UtkaChrome.dim
         clipRows.forEach { wire($0.toggle, action: #selector(clipboardToggled(_:))) }
         clipAge.font = UtkaChrome.font(13)
         clipAge.alignment = .center
@@ -318,6 +329,7 @@ final class SettingsPanel: NSObject {
         body.addSubview(shotCleanup)
         body.addSubview(shotDisposalLabel)
         body.addSubview(shotDisposal)
+        body.addSubview(outboxButton)
         (clipViews + [clipAge, clipAgeUnit]).forEach { body.addSubview($0) }
         ([quackSwitch.label, quackSwitch.toggle, quackCaption, quackRepeat.label, quackRepeat.toggle, quackThrough, quackAge, quackAgeUnit] as [NSView])
             .forEach { body.addSubview($0) }
@@ -413,6 +425,7 @@ final class SettingsPanel: NSObject {
         libraryLines.forEach { $0.applyLook() }
         libraryEmpty.textColor = UtkaChrome.dim
         libraryBack.contentTintColor = UtkaChrome.ink
+        outboxButton.contentTintColor = UtkaChrome.dim
     }
 
     /// Показывает контролы только текущей вкладки.
@@ -439,6 +452,7 @@ final class SettingsPanel: NSObject {
         let disposal = shot && shotCleanup.state == .on
         shotDisposalLabel.isHidden = !disposal
         shotDisposal.isHidden = !disposal
+        outboxButton.isHidden = !shot
         let clipboard = page == .clipboard
         clipViews.forEach { $0.isHidden = !clipboard }
         let age = clipboard && clipExpire.toggle.state == .on
@@ -587,6 +601,11 @@ final class SettingsPanel: NSObject {
         guard !moving else { return }
         timer.invalidate()
         motionTimer = nil
+    }
+
+    /// Показывает в Finder папку, где лежат копии переноса.
+    @objc private func openOutbox() {
+        NSWorkspace.shared.open(UtkaPaths.outbox)
     }
 
     /// Запоминает, снимать ли свой снимок с полки после переноса.
@@ -912,6 +931,9 @@ final class SettingsPanel: NSObject {
             y = layoutCalendar(text: text, y: y)
         }
         let sideBottom = pinUpdates(x: sideX, above: above, width: sideW, pageBottom: y)
+        let box: CGFloat = 22
+        outboxButton.frame = NSRect(x: width - pad - box, y: body.bounds.height - 16 - box, width: box, height: box)
+        body.addSubview(outboxButton, positioned: .above, relativeTo: nil)
         pourPill()
         let column = max(sideBottom, y)
         place(railLine, NSRect(x: rail, y: sideTop, width: 1, height: max(24, column - sideTop)))
