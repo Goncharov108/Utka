@@ -1060,22 +1060,26 @@ private final class PulseAppRow: NSView {
         super.layout()
         let h = bounds.height
         let icon: CGFloat = 18
-        iconView.frame = NSRect(x: 0, y: (h - icon) / 2, width: icon, height: icon)
+        // Текст в NSTextField чуть ниже центра рамки — иконку опускаем на 1 pt, чтобы легли в одну линию.
+        let iconY = max(0, (h - icon) / 2 - 1)
+        iconView.frame = NSRect(x: 0, y: iconY, width: icon, height: icon)
         let quitW: CGFloat = quitButton.isHidden ? 0 : 68
         if !quitButton.isHidden {
             quitButton.frame = NSRect(x: bounds.width - quitW, y: max(0, (h - 20) / 2), width: quitW, height: min(20, h))
         }
         let memW: CGFloat = 58
         let cpuW: CGFloat = 48
+        let textH: CGFloat = 16
+        let textY = max(0, (h - textH) / 2)
         let right = bounds.width - quitW - (quitButton.isHidden ? 0 : 6)
-        memLabel.frame = NSRect(x: right - memW, y: 0, width: memW, height: h)
-        cpuLabel.frame = NSRect(x: memLabel.frame.minX - cpuW - 4, y: 0, width: cpuW, height: h)
+        memLabel.frame = NSRect(x: right - memW, y: textY, width: memW, height: textH)
+        cpuLabel.frame = NSRect(x: memLabel.frame.minX - cpuW - 4, y: textY, width: cpuW, height: textH)
         let nameX = iconView.frame.maxX + 6
         nameLabel.frame = NSRect(
             x: nameX,
-            y: 0,
+            y: textY,
             width: max(20, cpuLabel.frame.minX - nameX - 6),
-            height: h
+            height: textH
         )
     }
 
