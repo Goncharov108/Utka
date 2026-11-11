@@ -747,7 +747,7 @@ final class SettingsPanel: NSObject {
         control.action = action
     }
 
-    /// Свой офлайн-движок перевода: utka-apps/utka-translate. Единственный
+    /// Свой офлайн-движок перевода: Goncharov108/utka-translate. Единственный
     /// способ перевода в Утке — ни Apple, ни какой-либо сторонний сервис,
     /// ни открытие системных настроек здесь больше не задействованы.
     private func refreshNative() {

@@ -1,8 +1,8 @@
 import AppKit
 
-/// Плагин «Утка звук» из отдельного релиза utka-apps, не из репозитория утки.
+/// Плагин «Утка звук» из отдельного будущего выпуска Goncharov108, не из репозитория утки.
 enum SoundPlugin {
-    /// Релиза ещё нет. Ссылку не подставляем, пока utka-apps его не опубликует.
+    /// Релиза ещё нет. Ссылку не подставляем, пока Goncharov108 его не опубликует.
     private static let releaseURL: URL? = nil
     private static let hal = "/Library/Audio/Plug-Ins/HAL"
     private static let driverName = "UtkaAudio.driver"

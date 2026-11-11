@@ -3,7 +3,7 @@ import CryptoKit
 
 /// Свой офлайн-переводчик en↔ru: не Apple, не Google, не какой-либо
 /// сторонний сервис. Движок и модели — из отдельного репозитория
-/// utka-apps/utka-translate, скачиваются один раз в поддержку утки и
+/// Goncharov108/utka-translate, скачиваются один раз в поддержку утки и
 /// дальше работают полностью локально, без единого обращения в сеть.
 enum NativeTranslate {
     /// Понятный текст вместо сырого «Bad CPU type in executable».
@@ -11,7 +11,7 @@ enum NativeTranslate {
 
     #if arch(arm64)
     private static let releaseURL = URL(
-        string: "https://github.com/utka-apps/utka-translate/releases/download/v0.1.0-runtime-macos-arm64/utka-translate-macos-arm64.zip"
+        string: "https://github.com/Goncharov108/utka-translate/releases/download/v0.1.0-runtime-macos-arm64/utka-translate-macos-arm64.zip"
     )!
     /// SHA-256 архива v0.1.0-runtime-macos-arm64.
     private static let expectedSHA256 = "622a640cd30632ae5b8b7f1bad1a9e78ceab11f65b007edbfc3c4be16e3263c1"
@@ -19,7 +19,7 @@ enum NativeTranslate {
     private static let hostCPUType: UInt32 = 0x0100000c
     #elseif arch(x86_64)
     private static let releaseURL = URL(
-        string: "https://github.com/utka-apps/utka-translate/releases/download/v0.1.1-runtime-macos-x86_64/utka-translate-macos-x86_64.zip"
+        string: "https://github.com/Goncharov108/utka-translate/releases/download/v0.1.1-runtime-macos-x86_64/utka-translate-macos-x86_64.zip"
     )!
     /// SHA-256 архива v0.1.1-runtime-macos-x86_64.
     private static let expectedSHA256 = "b96a903d32b348aab520103d23c4b0eee78b8595c26eef9296d514f9d7d8b290"
