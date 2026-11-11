@@ -22,6 +22,112 @@ enum UtkaPaths {
         let root = shots.path
         return path == root || path.hasPrefix(root + "/")
     }
+
+    /// Копии на время переноса. Получатель читает их, оригинал можно стереть сразу.
+    static var outbox: URL {
+        let dir = support.appendingPathComponent("Outbox", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Свой снимок для драга: то же имя и те же метки времени, байты PNG как были.
+    /// nil — копия не создалась, тащить исходник и не стирать его.
+    static func exportCopy(of url: URL) -> URL? {
+        let source = url.standardizedFileURL
+        guard ownsShot(source.path), FileManager.default.fileExists(atPath: source.path) else { return nil }
+        let name = source.lastPathComponent
+        guard isSafeFileName(name) else { return nil }
+        let folder = outbox.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dest = folder.appendingPathComponent(name)
+        let partial = folder.appendingPathComponent("." + name + ".part")
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: source, to: partial)
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try FileManager.default.removeItem(at: dest)
+            }
+            try FileManager.default.moveItem(at: partial, to: dest)
+            copyTimestamps(from: source.path, to: dest.path)
+            guard fileSizesMatch(source.path, dest.path) else {
+                try? FileManager.default.removeItem(at: folder)
+                return nil
+            }
+            return dest
+        } catch {
+            try? FileManager.default.removeItem(at: folder)
+            return nil
+        }
+    }
+
+    /// Папки в Outbox старше суток убирает сама утка. За пределами Outbox ничего не трогает.
+    static func startOutboxCleanup() {
+        sweepOutboxSoon()
+        guard outboxTimer == nil else { return }
+        let timer = Timer(timeInterval: 60 * 60, repeats: true) { _ in
+            sweepOutboxSoon()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        outboxTimer = timer
+    }
+
+    private static var outboxTimer: Timer?
+    private static let outboxMaxAge: TimeInterval = 24 * 60 * 60
+
+    private static func sweepOutboxSoon() {
+        DispatchQueue.global(qos: .utility).async { sweepOutbox() }
+    }
+
+    /// Стирает только настоящие прямые папки внутри Outbox. Симлинк и чужой каталог пропускает.
+    private static func sweepOutbox() {
+        let root = outbox.standardizedFileURL.path
+        let supportPath = support.standardizedFileURL.path
+        guard root.hasPrefix(supportPath + "/") else { return }
+        guard (root as NSString).lastPathComponent == "Outbox" else { return }
+        guard realDirectoryBirth(root) != nil else { return }
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []
+        let cutoff = Date().addingTimeInterval(-outboxMaxAge)
+        for name in names {
+            guard isSafeFileName(name) else { continue }
+            let child = (root as NSString).appendingPathComponent(name)
+            guard child.hasPrefix(root + "/") else { continue }
+            guard (child as NSString).deletingLastPathComponent == root else { continue }
+            guard let born = realDirectoryBirth(child), born < cutoff else { continue }
+            guard realDirectoryBirth(child) != nil else { continue }
+            try? FileManager.default.removeItem(atPath: child)
+        }
+    }
+
+    /// Имя одного файла, без перехода в другой каталог.
+    private static func isSafeFileName(_ name: String) -> Bool {
+        !name.isEmpty && name != "." && name != ".." && !name.contains("/") && !name.contains("\0")
+    }
+
+    /// Дата создания каталога. Файл и символическая ссылка — nil.
+    private static func realDirectoryBirth(_ path: String) -> Date? {
+        var info = Darwin.stat()
+        let ok = path.withCString { Darwin.lstat($0, &info) } == 0
+        guard ok, (info.st_mode & S_IFMT) == S_IFDIR else { return nil }
+        let birth = info.st_birthtimespec
+        let stamp = birth.tv_sec > 0 ? birth : info.st_mtimespec
+        return Date(timeIntervalSince1970: TimeInterval(stamp.tv_sec) + TimeInterval(stamp.tv_nsec) / 1_000_000_000)
+    }
+
+    /// Копия той же длины, что исходник. Иначе файл обрезан и его нельзя отдавать.
+    private static func fileSizesMatch(_ left: String, _ right: String) -> Bool {
+        let leftSize = (try? FileManager.default.attributesOfItem(atPath: left)[.size] as? NSNumber)?.intValue
+        let rightSize = (try? FileManager.default.attributesOfItem(atPath: right)[.size] as? NSNumber)?.intValue
+        return leftSize != nil && leftSize == rightSize
+    }
+
+    /// Creation и modification как у исходника. Байты файла не переписывает.
+    private static func copyTimestamps(from source: String, to dest: String) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: source) else { return }
+        var stamp: [FileAttributeKey: Any] = [:]
+        if let created = attrs[.creationDate] { stamp[.creationDate] = created }
+        if let modified = attrs[.modificationDate] { stamp[.modificationDate] = modified }
+        guard !stamp.isEmpty else { return }
+        try? FileManager.default.setAttributes(stamp, ofItemAtPath: dest)
+    }
 }
 
 /// Картинка, а не документ. Карандаш на карточке только у таких файлов.
@@ -353,6 +459,8 @@ func utkaLift(_ view: NSView, _ amount: CGFloat) {
 final class FileCardView: NSView, NSDraggingSource {
     var fileURL: URL?
     var consumeOnDrop = false
+    /// Свой снимок полки: наружу уходит копия в Outbox, не файл в Shots.
+    var exportsOwnedShot = false
     var onRemove: (() -> Void)?
     var onDrag: ((Bool) -> Void)?
     var onEdit: (() -> Void)? { didSet { updatePencil() } }
@@ -365,7 +473,7 @@ final class FileCardView: NSView, NSDraggingSource {
     var onExportBegan: ((String) -> Void)?
     /// Полка: драг отменён, защиту имени можно снять.
     var onExportCancel: ((String) -> Void)?
-    /// Полка: дроп удался. Карточка уходит, файл стирается, когда получатель его отпустил.
+    /// Полка: дроп удался. Карточка уходит, свой снимок стирается сразу.
     var onConsume: (() -> Void)?
     /// Отпускание над полкой — файл просто вернули. Карточку не снимаем.
     var cardStaysOnDrop: ((NSPoint) -> Bool)?
@@ -379,6 +487,8 @@ final class FileCardView: NSView, NSDraggingSource {
     private var reorderGrab = NSPoint.zero
     private var pressPoint = NSPoint.zero
     private var dragName: String?
+    /// Копия не создалась: после дропа карточку и исходник оставляем.
+    private var handedOriginal = false
     private var lastClickAt = Date.distantPast
     private var lastClickPoint = NSPoint.zero
     private var showsPicture = false
@@ -509,12 +619,23 @@ final class FileCardView: NSView, NSDraggingSource {
     private func beginExport(with event: NSEvent) {
         guard !didDrag, let url = fileURL else { return }
         didDrag = true
+        let exportURL = urlForExport(url)
         dragName = url.lastPathComponent
         onExportBegan?(url.lastPathComponent)
         onDrag?(true)
-        let item = NSDraggingItem(pasteboardWriter: url as NSURL)
+        let item = NSDraggingItem(pasteboardWriter: exportURL as NSURL)
         item.setDraggingFrame(NSRect(x: 0, y: 0, width: 48, height: 48), contents: iconView.image)
         beginDraggingSession(with: [item], event: event, source: self)
+    }
+
+    /// Своему снимку — копия. Чужой файл, закреп и сбой копии — сам исходник.
+    private func urlForExport(_ url: URL) -> URL {
+        guard exportsOwnedShot, let copy = UtkaPaths.exportCopy(of: url) else {
+            handedOriginal = exportsOwnedShot
+            return url
+        }
+        handedOriginal = false
+        return copy
     }
 
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
@@ -531,9 +652,11 @@ final class FileCardView: NSView, NSDraggingSource {
         let returned = cardStaysOnDrop?(screenPoint) ?? false
         guard !operation.isEmpty, !returned else {
             if let name { onExportCancel?(name) }
+            handedOriginal = false
             return
         }
-        if consumeOnDrop { onConsume?() }
+        if consumeOnDrop, !handedOriginal { onConsume?() }
+        handedOriginal = false
     }
 
     override func mouseUp(with event: NSEvent) {

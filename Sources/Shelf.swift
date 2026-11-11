@@ -146,7 +146,7 @@ final class ShelfModel {
         saveDesktopKeeps()
     }
 
-    /// Удачный перенос: карточка уходит сразу, свой снимок стирается, когда получатель его отпустил.
+    /// Удачный перенос: карточка уходит сразу. Оригинал стирается без ожидания — получатель читает копию.
     func consumeDropped(id: String) {
         guard let record = records.first(where: { $0.id == id }) else { return }
         let path = record.path
@@ -156,7 +156,7 @@ final class ShelfModel {
         onChange?()
         guard UtkaPaths.ownsShot(path), FileManager.default.fileExists(atPath: path) else { return }
         knownShots.insert(path)
-        deleteShotWhenIdle(path: path, name: name)
+        deleteOwnedShot(path: path, name: name)
     }
 
     /// Карточка та же, файл на диске уже другой. Превью нужно перечитать.
@@ -173,6 +173,7 @@ final class ShelfModel {
         guard watchers.isEmpty else { return }
         let shots = UtkaPaths.shots
         try? FileManager.default.createDirectory(at: shots, withIntermediateDirectories: true)
+        UtkaPaths.startOutboxCleanup()
         retargetScreenshotCapture(to: shots)
         relocateDesktopShots()
         // «Виденным» считаем только то, что уже есть в записях «Полки» — иначе
@@ -381,34 +382,35 @@ final class ShelfModel {
         try? data.write(to: keepsURL, options: .atomic)
     }
 
-    /// Стирает снимок полки только после того, как получатель дропа закрыл и исходник, и копию на столе.
-    private func deleteShotWhenIdle(path: String, name: String) {
+    /// Оригинал стирается сразу: его уже никто не читает. На столе сначала ждём целый PNG.
+    private func deleteOwnedShot(path: String, name: String) {
         let sourceSize = fileByteCount(path)
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let started = Date()
-            var quietSince: Date?
-            while true {
-                let held = OpenFile.othersHold(path)
-                let incomplete = self?.desktopCopyIncomplete(name: name, sourceSize: sourceSize) ?? false
-                let onDesktop = self?.desktopHasFile(name) ?? false
-                let busy = held || incomplete
-                let now = Date()
-                if busy {
-                    quietSince = nil
-                } else if quietSince == nil {
-                    quietSince = now
-                }
-                let waited = now.timeIntervalSince(started)
-                let quiet = quietSince.map { now.timeIntervalSince($0) } ?? 0
-                // На столе ждём целый png. В другую папку — пока исходник не отпустят.
-                let minWait: TimeInterval = onDesktop ? 0.3 : 1.5
-                if !busy && waited >= minWait && quiet >= 0.35 { break }
-                if waited > 45 { break }
-                Thread.sleep(forTimeInterval: 0.1)
+            guard let self else { return }
+            if self.desktopHasFile(name), !self.desktopPngReady(name: name, sourceSize: sourceSize) {
+                return
             }
-            guard !OpenFile.othersHold(path) else { return }
-            if self?.desktopCopyIncomplete(name: name, sourceSize: sourceSize) == true { return }
-            self?.disposeOwnedShot(path)
+            self.disposeOwnedShot(path)
+        }
+    }
+
+    /// false — файл на столе так и короче исходника или без заголовка PNG.
+    private func desktopPngReady(name: String, sourceSize: Int) -> Bool {
+        let started = Date()
+        var quietSince: Date?
+        while true {
+            let incomplete = desktopCopyIncomplete(name: name, sourceSize: sourceSize)
+            let now = Date()
+            if incomplete {
+                quietSince = nil
+            } else if quietSince == nil {
+                quietSince = now
+            }
+            let waited = now.timeIntervalSince(started)
+            let quiet = quietSince.map { now.timeIntervalSince($0) } ?? 0
+            if !incomplete && waited >= 0.3 && quiet >= 0.35 { return true }
+            if waited > 45 { return !desktopCopyIncomplete(name: name, sourceSize: sourceSize) }
+            Thread.sleep(forTimeInterval: 0.1)
         }
     }
 
@@ -518,6 +520,7 @@ final class ShelfView: NSView {
             let card = FileCardView()
             card.show(url: model.url(for: record), title: record.name)
             let ownedShot = UtkaPaths.ownsShot(record.path)
+            card.exportsOwnedShot = ownedShot
             card.consumeOnDrop = ownedShot ? ShelfModel.deleteShotAfterUse : true
             card.onDrag = { [weak self] active in self?.onDrag?(active) }
             card.onExportBegan = { [weak self] name in self?.model.protectDesktopName(name) }
