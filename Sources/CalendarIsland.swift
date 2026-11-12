@@ -362,21 +362,24 @@ private final class MonthGrid: NSView {
     }
 }
 
-/// Строка очереди: время, заголовок и птичка, если заметка крякает.
+/// Строка очереди: время, заголовок и колокольчик, если заметка крякает.
 private final class CalendarNoteRow: NSView {
     var onClick: (() -> Void)?
     private let timeLabel = UtkaChrome.label("", size: 12, weight: .medium)
     private let titleLabel = UtkaChrome.label("", size: 13, weight: .semibold)
-    private let bird = NSImageView()
+    private let quackMark = NSImageView()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.cornerRadius = 6
-        bird.imageScaling = .scaleProportionallyDown
+        quackMark.imageScaling = .scaleNone
+        quackMark.imageAlignment = .alignCenter
+        quackMark.image = NSImage(systemSymbolName: "bell.fill", accessibilityDescription: "Кряк")?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
         addSubview(timeLabel)
         addSubview(titleLabel)
-        addSubview(bird)
+        addSubview(quackMark)
     }
 
     required init?(coder: NSCoder) { nil }
@@ -387,10 +390,8 @@ private final class CalendarNoteRow: NSView {
         titleLabel.stringValue = title
         timeLabel.textColor = ringing ? IslandLook.accent : UtkaChrome.dim
         titleLabel.textColor = UtkaChrome.ink
-        bird.isHidden = !quack
-        bird.image = NSImage(systemSymbolName: "bird.fill", accessibilityDescription: "Кряк")?
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
-        bird.contentTintColor = ringing ? IslandLook.accent : UtkaChrome.dim
+        quackMark.isHidden = !quack
+        quackMark.contentTintColor = ringing ? IslandLook.accent : UtkaChrome.dim
         layer?.backgroundColor = (ringing ? IslandLook.accent.withAlphaComponent(0.28) : UtkaChrome.card).cgColor
     }
 
@@ -398,9 +399,9 @@ private final class CalendarNoteRow: NSView {
         super.layout()
         let mid = (bounds.height - 16) / 2
         timeLabel.frame = NSRect(x: 8, y: mid, width: 44, height: 16)
-        bird.frame = NSRect(x: bounds.width - 22, y: mid, width: 16, height: 16)
+        quackMark.frame = NSRect(x: bounds.width - 22, y: mid, width: 16, height: 16)
         let titleX = timeLabel.frame.maxX + 6
-        titleLabel.frame = NSRect(x: titleX, y: mid, width: max(20, bird.frame.minX - 6 - titleX), height: 16)
+        titleLabel.frame = NSRect(x: titleX, y: mid, width: max(20, quackMark.frame.minX - 6 - titleX), height: 16)
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -431,8 +432,7 @@ final class CalendarIslandView: NSView, NSTextViewDelegate {
     private let queue = NSScrollView()
     private let document = FlippedView()
     private let empty = UtkaChrome.label("Заметок нет", size: 13, color: UtkaChrome.dim)
-    private let dayBack = calendarIconButton(symbol: "chevron.left", tip: "День раньше", target: CalendarIslandView.holder, action: #selector(CalendarIslandView.earlierDay))
-    private let dayForward = calendarIconButton(symbol: "chevron.right", tip: "День позже", target: CalendarIslandView.holder, action: #selector(CalendarIslandView.laterDay))
+    private let backButton = calendarIconButton(symbol: "chevron.left", tip: "Назад", target: CalendarIslandView.holder, action: #selector(CalendarIslandView.cancelTapped))
     private let dateLabel = UtkaChrome.label("", size: 13, weight: .semibold)
     private let hourField = ClockField(max: 23)
     private let minuteField = ClockField(max: 59)
@@ -441,11 +441,10 @@ final class CalendarIslandView: NSView, NSTextViewDelegate {
     private let bodyScroll = NSScrollView()
     private let bodyView = NSTextView()
     private let bodyHint = UtkaChrome.label("Текст", size: 13, color: UtkaChrome.dim)
-    private let quackLabel = UtkaChrome.label("Крякнуть", size: 13, weight: .medium)
+    private let quackLabel = UtkaChrome.label("Крякер", size: 13, weight: .medium)
     private let quackSwitch = NSSwitch()
-    private let cancelButton = NSButton()
     private let saveButton = NSButton()
-    private let deleteButton = NSButton()
+    private let deleteButton = calendarIconButton(symbol: "trash.fill", tip: "Удалить", target: CalendarIslandView.holder, action: #selector(CalendarIslandView.deleteTapped))
     private static let holder = NSObject()
 
     private var visibleMonth = CalendarClock.monthStart(Date())
@@ -470,10 +469,12 @@ final class CalendarIslandView: NSView, NSTextViewDelegate {
         super.init(frame: .zero)
         plus.target = self
         plus.action = #selector(addTapped)
-        dayBack.target = self
-        dayBack.action = #selector(earlierDay)
-        dayForward.target = self
-        dayForward.action = #selector(laterDay)
+        backButton.target = self
+        backButton.action = #selector(cancelTapped)
+        deleteButton.target = self
+        deleteButton.action = #selector(deleteTapped)
+        deleteButton.image = NSImage(systemSymbolName: "trash.fill", accessibilityDescription: "Удалить")?
+            .withSymbolConfiguration(.init(pointSize: 15, weight: .medium))
         month.onDay = { [weak self] day in self?.pick(day) }
         month.onMonth = { [weak self] step in self?.shiftMonth(step) }
         split.wantsLayer = true
@@ -523,8 +524,7 @@ final class CalendarIslandView: NSView, NSTextViewDelegate {
     func applyLook() {
         month.applyLook()
         plus.contentTintColor = UtkaChrome.ink
-        dayBack.contentTintColor = UtkaChrome.ink
-        dayForward.contentTintColor = UtkaChrome.ink
+        backButton.contentTintColor = UtkaChrome.ink
         split.layer?.backgroundColor = UtkaChrome.dim.withAlphaComponent(0.28).cgColor
         empty.textColor = UtkaChrome.dim
         dateLabel.textColor = UtkaChrome.ink
@@ -542,9 +542,9 @@ final class CalendarIslandView: NSView, NSTextViewDelegate {
         bodyScroll.layer?.backgroundColor = UtkaChrome.card.cgColor
         bodyHint.textColor = UtkaChrome.dim
         quackLabel.textColor = UtkaChrome.ink
-        for button in [cancelButton, saveButton, deleteButton] {
-            button.font = UtkaChrome.font(13, weight: .medium)
-        }
+        quackLabel.font = UtkaChrome.font(13, weight: .medium)
+        saveButton.font = UtkaChrome.font(13, weight: .medium)
+        deleteButton.contentTintColor = UtkaChrome.ink
         queueDirty = true
         needsLayout = true
     }
@@ -598,9 +598,7 @@ final class CalendarIslandView: NSView, NSTextViewDelegate {
         bodyView.textContainer?.widthTracksTextView = true
         bodyView.isAutomaticQuoteSubstitutionEnabled = false
         bodyScroll.documentView = bodyView
-        styleText(cancelButton, title: "Отмена", action: #selector(cancelTapped))
         styleText(saveButton, title: "Сохранить", action: #selector(saveTapped))
-        styleText(deleteButton, title: "Удалить", action: #selector(deleteTapped))
         dateLabel.alignment = .center
     }
 
@@ -625,7 +623,7 @@ final class CalendarIslandView: NSView, NSTextViewDelegate {
     }
 
     private func editorViews() -> [NSView] {
-        [dayBack, dateLabel, dayForward, hourField, colon, minuteField, titleField, bodyScroll, bodyHint, quackLabel, quackSwitch, cancelButton, saveButton, deleteButton]
+        [backButton, dateLabel, hourField, colon, minuteField, titleField, bodyScroll, bodyHint, quackLabel, quackSwitch, saveButton, deleteButton]
     }
 
     private func placeColumns() {
@@ -715,17 +713,6 @@ final class CalendarIslandView: NSView, NSTextViewDelegate {
 
     private func refreshDateLabel() {
         dateLabel.stringValue = CalendarClock.dayTitle(draftDay)
-    }
-
-    @objc private func earlierDay() { shiftDraft(-1) }
-    @objc private func laterDay() { shiftDraft(1) }
-
-    private func shiftDraft(_ step: Int) {
-        guard editorOn else { return }
-        draftDay = CalendarClock.calendar.date(byAdding: .day, value: step, to: draftDay) ?? draftDay
-        visibleMonth = CalendarClock.monthStart(draftDay)
-        refreshDateLabel()
-        refreshMonth()
     }
 
     func textDidChange(_ notification: Notification) {
@@ -872,39 +859,32 @@ final class CalendarIslandView: NSView, NSTextViewDelegate {
         let x = area.minX
         let width = area.width
         var y = area.maxY - 26
-        dayBack.frame = NSRect(x: x, y: y, width: 22, height: 22)
-        dayForward.frame = NSRect(x: x + width - 22, y: y, width: 22, height: 22)
+        backButton.frame = NSRect(x: x, y: y, width: 22, height: 22)
         dateLabel.frame = NSRect(x: x + 26, y: y, width: max(40, width - 52), height: 22)
         y -= 30
         hourField.frame = NSRect(x: x, y: y, width: 40, height: 24)
         colon.frame = NSRect(x: hourField.frame.maxX, y: y, width: 12, height: 24)
         minuteField.frame = NSRect(x: colon.frame.maxX, y: y, width: 40, height: 24)
+        quackLabel.sizeToFit()
+        let switchSize = quackSwitch.fittingSize
+        let switchW = max(32, switchSize.width)
+        let switchH = max(18, switchSize.height)
+        quackSwitch.frame = NSRect(x: x + width - switchW, y: y + (24 - switchH) / 2, width: switchW, height: switchH)
+        let labelW = ceil(quackLabel.frame.width)
+        quackLabel.frame = NSRect(x: quackSwitch.frame.minX - 6 - labelW, y: y + 3, width: labelW, height: 18)
         y -= 30
         titleField.frame = NSRect(x: x, y: y, width: width, height: 24)
         let buttonsY = area.minY
-        let quackY = buttonsY + 30
         let bodyTop = y - 6
-        let bodyH = max(28, bodyTop - (quackY + 24))
+        let bodyH = max(28, bodyTop - (buttonsY + 32))
         let bodyBottom = bodyTop - bodyH
         bodyScroll.frame = NSRect(x: x, y: bodyBottom, width: width, height: bodyH)
         bodyHint.frame = NSRect(x: x + 8, y: bodyScroll.frame.maxY - 22, width: width - 16, height: 18)
         let bodyWidth = max(40, bodyScroll.contentSize.width)
         bodyView.textContainer?.containerSize = NSSize(width: bodyWidth, height: CGFloat.greatestFiniteMagnitude)
         if bodyView.frame.width != bodyWidth { bodyView.frame.size.width = bodyWidth }
-        quackLabel.sizeToFit()
-        let switchSize = quackSwitch.fittingSize
-        let switchW = max(32, switchSize.width)
-        let switchH = max(18, switchSize.height)
-        quackSwitch.frame = NSRect(x: x + width - switchW, y: quackY, width: switchW, height: switchH)
-        quackLabel.frame = NSRect(
-            x: quackSwitch.frame.minX - 8 - quackLabel.frame.width,
-            y: quackY + (switchH - 18) / 2,
-            width: quackLabel.frame.width,
-            height: 18
-        )
-        let buttonW = min(92, max(72, (width - 8) / 3))
-        saveButton.frame = NSRect(x: x + width - buttonW, y: buttonsY, width: buttonW, height: 26)
-        cancelButton.frame = NSRect(x: saveButton.frame.minX - 8 - buttonW, y: buttonsY, width: buttonW, height: 26)
-        deleteButton.frame = NSRect(x: x, y: buttonsY, width: min(88, buttonW), height: 26)
+        let buttonW = min(120, max(96, width * 0.42))
+        saveButton.frame = NSRect(x: x + width - buttonW + 6, y: buttonsY, width: buttonW, height: 26)
+        deleteButton.frame = NSRect(x: x, y: buttonsY + 2, width: 22, height: 22)
     }
 }
