@@ -86,12 +86,26 @@ struct PulseApp {
 
 /// Собирает процессор, давление памяти, нагрев и виновников по программам.
 enum PulseReader {
+    /// prevCPU, prevTicks, prevStamp, icons и thumbs трогаются только с этой очереди.
+    private static let queue = DispatchQueue(label: "dev.goncharov.utka.pulse", qos: .utility)
     private static var prevCPU: host_cpu_load_info?
     private static var prevTicks: [pid_t: UInt64] = [:]
     private static var prevStamp: CFAbsoluteTime = 0
+    private static var icons: [String: NSImage] = [:]
+    /// Исходник держится в паре, чтобы его ObjectIdentifier не достался другой картинке.
+    private static var thumbs: [ObjectIdentifier: (source: NSImage, thumb: NSImage)] = [:]
+
+    /// Опрос на своей очереди, снимок отдаётся в главный поток.
+    static func sample(then done: @escaping (PulseSnapshot) -> Void) {
+        queue.async {
+            let shot = collect()
+            DispatchQueue.main.async { done(shot) }
+        }
+    }
 
     /// Один опрос Darwin/AppKit. Температура — через SMC (недокументированный IOKit), без пароля.
-    static func sample() -> PulseSnapshot {
+    private static func collect() -> PulseSnapshot {
+        dispatchPrecondition(condition: .onQueue(queue))
         let cpu = systemCPU()
         let pressure = memoryPressure()
         let heat = heatGauge()
@@ -102,13 +116,18 @@ enum PulseReader {
         } else {
             headline = "Всё спокойно"
         }
+        let shown = apps.prefix(5).map { app -> PulseApp in
+            var app = app
+            app.icon = thumbnail(app.icon)
+            return app
+        }
         return PulseSnapshot(
             headline: headline,
             cpuShare: cpu,
             memoryPressure: pressure,
             heatTitle: heat.title,
             heatShare: heat.share,
-            apps: Array(apps.prefix(5))
+            apps: shown
         )
     }
 
@@ -253,7 +272,7 @@ enum PulseReader {
                 row.icon = icon
             } else if let host, host.activationPolicy == .regular {
                 row.name = friendlyName(rawName: rawName, path: path, app: host)
-                row.icon = host.icon ?? row.icon
+                row.icon = appIcon(host) ?? row.icon
                 row.bundleURL = host.bundleURL ?? row.bundleURL
                 row.bundleID = host.bundleIdentifier ?? row.bundleID
                 row.mainPID = host.processIdentifier
@@ -279,7 +298,7 @@ enum PulseReader {
                 row.name = "Colima"
             } else if let host, host.activationPolicy == .regular {
                 row.name = friendlyName(rawName: row.name, path: host.bundleURL?.path ?? "", app: host)
-                row.icon = host.icon ?? row.icon
+                row.icon = appIcon(host) ?? row.icon
                 row.bundleURL = host.bundleURL ?? row.bundleURL
                 row.bundleID = host.bundleIdentifier ?? row.bundleID
                 row.mainPID = host.processIdentifier
@@ -375,18 +394,70 @@ enum PulseReader {
     private static func friendlyIcon(path: String, app: NSRunningApplication?) -> NSImage {
         if isColimaFamily(rawName: "", path: path) {
             let colima = "/usr/local/bin/colima"
-            if FileManager.default.fileExists(atPath: colima) {
-                return NSWorkspace.shared.icon(forFile: colima)
+            if let icon = cachedIcon("colima", {
+                FileManager.default.fileExists(atPath: colima) ? NSWorkspace.shared.icon(forFile: colima) : nil
+            }) {
+                return icon
             }
         }
-        if let app, let icon = app.icon { return icon }
-        if let bundle = bundlePath(from: path) {
-            return NSWorkspace.shared.icon(forFile: bundle)
+        if let app, let icon = appIcon(app) { return icon }
+        let file = bundlePath(from: path) ?? (path.isEmpty ? "/bin/ps" : path)
+        return fileIcon(file)
+    }
+
+    /// Значок запущенной программы: по bundle id, иначе по пути.
+    private static func appIcon(_ app: NSRunningApplication) -> NSImage? {
+        let key = app.bundleIdentifier.map { "id:" + $0 }
+            ?? (app.bundleURL ?? app.executableURL).map { "path:" + $0.path }
+        guard let key else { return app.icon }
+        return cachedIcon(key) { app.icon }
+    }
+
+    /// Значок файла или .app по пути.
+    private static func fileIcon(_ path: String) -> NSImage {
+        cachedIcon("path:" + path) { NSWorkspace.shared.icon(forFile: path) } ?? NSImage()
+    }
+
+    /// Значок из кэша; новый запрашивается один раз на ключ.
+    private static func cachedIcon(_ key: String, _ make: () -> NSImage?) -> NSImage? {
+        if let hit = icons[key] { return hit }
+        guard let image = make() else { return nil }
+        if icons.count > 500 {
+            icons.removeAll()
+            thumbs.removeAll()
         }
-        if !path.isEmpty {
-            return NSWorkspace.shared.icon(forFile: path)
-        }
-        return NSWorkspace.shared.icon(forFile: "/bin/ps")
+        icons[key] = image
+        return image
+    }
+
+    /// Значок строки, заранее отрисованный в 18 pt: главный поток не выбирает размер из большой иконки.
+    private static func thumbnail(_ image: NSImage) -> NSImage {
+        let id = ObjectIdentifier(image)
+        if let hit = thumbs[id] { return hit.thumb }
+        let side: CGFloat = 18
+        let pixels = Int(side * 2)
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixels,
+            pixelsHigh: pixels,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return image }
+        rep.size = NSSize(width: side, height: side)
+        guard let context = NSGraphicsContext(bitmapImageRep: rep) else { return image }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        image.draw(in: NSRect(x: 0, y: 0, width: side, height: side))
+        NSGraphicsContext.restoreGraphicsState()
+        let thumb = NSImage(size: rep.size)
+        thumb.addRepresentation(rep)
+        thumbs[id] = (image, thumb)
+        return thumb
     }
 
     /// Имя без кракозябр и канцелярита «для приложения».
@@ -525,6 +596,7 @@ final class PulseIslandView: NSView {
     private let chevron = NSButton()
     private var rows: [PulseAppRow] = []
     private var timer: Timer?
+    private var sampling = false
     private var lookObserver: NSObjectProtocol?
     private var windowObserver: NSObjectProtocol? = nil
     private var quitPrompt: PulseQuitPrompt?
@@ -674,8 +746,7 @@ final class PulseIslandView: NSView {
 
     /// Опрос только пока раздел открыт и островок виден.
     private func syncSampling() {
-        let visible = superview != nil && window?.isVisible == true
-        if visible {
+        if isOnScreen {
             startSampling()
         } else {
             collapseDrawer(animated: false)
@@ -701,12 +772,29 @@ final class PulseIslandView: NSView {
         timer = nil
     }
 
+    /// Раздел открыт и островок на экране.
+    private var isOnScreen: Bool {
+        superview != nil && window?.isVisible == true
+    }
+
+    /// Запускает фоновый опрос, если прошлый уже вернулся.
     private func refresh() {
-        guard superview != nil, window?.isVisible == true else {
+        guard isOnScreen else {
             stopSampling()
             return
         }
-        let shot = PulseReader.sample()
+        guard !sampling else { return }
+        sampling = true
+        PulseReader.sample { [weak self] shot in
+            guard let self else { return }
+            self.sampling = false
+            guard self.timer != nil, self.isOnScreen else { return }
+            self.apply(shot)
+        }
+    }
+
+    /// Заголовок, кольца и строки программ из готового снимка.
+    private func apply(_ shot: PulseSnapshot) {
         headline.stringValue = shot.headline
         gauges.update(
             cpu: shot.cpuShare,
@@ -1048,7 +1136,9 @@ private final class PulseAppRow: NSView {
 
     func show(_ app: PulseApp) {
         key = app.key
-        iconView.image = app.icon
+        if iconView.image !== app.icon {
+            iconView.image = app.icon
+        }
         nameLabel.stringValue = app.name
         cpuLabel.stringValue = PulseReader.formatCPU(app.cpuPercent)
         memLabel.stringValue = PulseReader.formatMemory(app.memoryBytes)
