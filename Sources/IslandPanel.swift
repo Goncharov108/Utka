@@ -940,14 +940,15 @@ final class IslandPanel {
         root.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: root, queue: .main) { _ in
             self.sectionRail.frame = NSRect(x: 0, y: 0, width: 88, height: self.root.bounds.height)
-            markView.frame = NSRect(x: 44, y: self.root.bounds.height - 86, width: 40, height: 40)
+            let barH: CGFloat = 32
+            let barMidY = self.root.bounds.height - 12 - barH / 2
+            markView.frame = NSRect(x: 44, y: barMidY - 20, width: 40, height: 40)
             let railBottom: CGFloat = 14
-            let railTop = self.root.bounds.height - 96
+            let railTop = markView.frame.minY - 10
             self.railColumn.frame = NSRect(x: 0, y: railBottom, width: 88, height: max(RailIcon.side, railTop - railBottom))
             self.placeSectionButtons(animated: false)
             let bottom: CGFloat = 14
             let right: CGFloat = 48
-            let barH: CGFloat = 32
             self.topBar.frame = NSRect(x: 96, y: self.root.bounds.height - 12 - barH, width: max(120, self.root.bounds.width - 96 - right), height: barH)
             self.shotButton.frame = NSRect(x: self.topBar.bounds.width - 28, y: 4, width: 24, height: 24)
             self.soundStrip.frame = NSRect(x: 0, y: 0, width: max(0, self.shotButton.frame.minX - 8), height: barH)
