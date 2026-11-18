@@ -159,6 +159,8 @@ final class SettingsPanel: NSObject {
     private let lookMode = NSSegmentedControl()
     private let glassLabel = UtkaChrome.label("Стекло", size: 13, weight: .semibold)
     private let glassSlider = NSSlider()
+    private let fillLabel = UtkaChrome.label("Цвет интерфейса", size: 13, weight: .semibold)
+    private let fillWell = NSColorWell()
     private let accentLabel = UtkaChrome.label("Цвет элементов", size: 13, weight: .semibold)
     private let accentWell = NSColorWell()
     private let strokeLabel = UtkaChrome.label("Обводка", size: 13, weight: .semibold)
@@ -260,6 +262,10 @@ final class SettingsPanel: NSObject {
         glassSlider.doubleValue = IslandLook.glass
         glassSlider.target = self
         glassSlider.action = #selector(glassChanged)
+        fillWell.color = IslandLook.islandFill
+        fillWell.isContinuous = true
+        fillWell.target = self
+        fillWell.action = #selector(fillChanged)
         accentWell.color = IslandLook.accent
         accentWell.isContinuous = true
         accentWell.target = self
@@ -348,6 +354,8 @@ final class SettingsPanel: NSObject {
         body.addSubview(lookMode)
         body.addSubview(glassLabel)
         body.addSubview(glassSlider)
+        body.addSubview(fillLabel)
+        body.addSubview(fillWell)
         body.addSubview(accentLabel)
         body.addSubview(accentWell)
         body.addSubview(strokeLabel)
@@ -494,6 +502,8 @@ final class SettingsPanel: NSObject {
         lookMode.isHidden = !theme
         glassLabel.isHidden = !theme
         glassSlider.isHidden = !theme
+        fillLabel.isHidden = !theme
+        fillWell.isHidden = !theme
         accentLabel.isHidden = !theme
         accentWell.isHidden = !theme
         strokeLabel.isHidden = !theme
@@ -1307,7 +1317,7 @@ final class SettingsPanel: NSObject {
         view.alphaValue = 1
     }
 
-    /// Режим, стекло и один цвет выбранного.
+    /// Режим, стекло, заливка капли и акцент.
     private func layoutLook(text: NSRect, y: CGFloat) -> CGFloat {
         var y = y
         lookLabel.frame = NSRect(x: text.minX, y: y, width: text.width, height: 18)
@@ -1318,6 +1328,7 @@ final class SettingsPanel: NSObject {
         glassLabel.frame = NSRect(x: text.minX, y: y + 5, width: text.width - sliderWidth - 12, height: 18)
         glassSlider.frame = NSRect(x: text.maxX - sliderWidth, y: y, width: sliderWidth, height: 28)
         y += 40
+        y = layoutColor(fillLabel, fillWell, text: text, y: y) + 12
         y = layoutColor(accentLabel, accentWell, text: text, y: y) + 12
         y = layoutToggle(strokeLabel, strokeSwitch, text: text, y: y)
         guard IslandLook.strokeOn else { return y + 8 }
@@ -1340,6 +1351,10 @@ final class SettingsPanel: NSObject {
         IslandLook.glass = glassSlider.doubleValue
     }
 
+    @objc private func fillChanged() {
+        IslandLook.islandFill = fillWell.color
+    }
+
     @objc private func accentChanged() {
         IslandLook.accent = accentWell.color
     }
@@ -1355,7 +1370,9 @@ final class SettingsPanel: NSObject {
     /// Пока крутят цвет в панели, островок и это окно меняются сразу.
     @objc private func panelColorChanged() {
         let color = NSColorPanel.shared.color
-        if accentWell.isActive {
+        if fillWell.isActive {
+            IslandLook.islandFill = color
+        } else if accentWell.isActive {
             IslandLook.accent = color
         } else if strokeWell.isActive {
             IslandLook.strokeColor = color
@@ -1374,7 +1391,7 @@ final class SettingsPanel: NSObject {
         window.backgroundColor = .clear
         chrome.apply()
         strokeOverlay.needsDisplay = true
-        let inkLabels = [titleLabel, soundLabel, searchLabel, soundReady, nativeReady, nativeTitle, versionLabel, shotCleanupLabel, shotDisposalLabel, lookLabel, glassLabel, accentLabel, strokeLabel, strokeColorLabel, quackSwitch.label, quackRepeat.label, quackThrough]
+        let inkLabels = [titleLabel, soundLabel, searchLabel, soundReady, nativeReady, nativeTitle, versionLabel, shotCleanupLabel, shotDisposalLabel, lookLabel, glassLabel, fillLabel, accentLabel, strokeLabel, strokeColorLabel, quackSwitch.label, quackRepeat.label, quackThrough]
             + clipRows.map(\.label)
         inkLabels.forEach { $0.textColor = UtkaChrome.ink }
         let dimLabels = [soundCaption, searchCaption, translateCaption, soundNote, nativeNote, nativeState, clipSecretsCaption, quackCaption]
@@ -1384,6 +1401,7 @@ final class SettingsPanel: NSObject {
         quackAge.textColor = UtkaChrome.ink
         lookMode.selectedSegment = IslandLook.mode.rawValue
         glassSlider.doubleValue = IslandLook.glass
+        if !fillWell.isActive { fillWell.color = IslandLook.islandFill }
         if !accentWell.isActive { accentWell.color = IslandLook.accent }
         strokeSwitch.state = IslandLook.strokeOn ? .on : .off
         if !strokeWell.isActive { strokeWell.color = IslandLook.strokeColor }

@@ -217,6 +217,7 @@ enum IslandLook {
     private static let modeKey = "islandLookMode"
     private static let glassKey = "islandGlass"
     private static let accentKey = "islandAccent"
+    private static let fillKey = "islandFill"
     private static let strokeKey = "islandStroke"
     private static let strokeColorKey = "islandStrokeColor"
 
@@ -248,6 +249,12 @@ enum IslandLook {
         set { store(newValue, key: accentKey) }
     }
 
+    /// Заливка капли. Без своего цвета — чёрный/белый от темы.
+    static var islandFill: NSColor {
+        get { storedColor(fillKey) ?? (dark ? .black : .white) }
+        set { store(newValue, key: fillKey) }
+    }
+
     private static func storedColor(_ key: String) -> NSColor? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
         return try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data)
@@ -262,6 +269,7 @@ enum IslandLook {
     }
 
     static var hasAccent: Bool { UserDefaults.standard.data(forKey: accentKey) != nil }
+    static var hasFill: Bool { UserDefaults.standard.data(forKey: fillKey) != nil }
 
     /// Обводка капли. Без ключа выключена.
     static var strokeOn: Bool {
@@ -297,11 +305,10 @@ enum IslandLook {
 
     /// Плотная заливка капли. Прозрачность стекла её разбавляет.
     static var veil: NSColor {
-        let solid: NSColor = dark ? .black : .white
-        return solid.withAlphaComponent(CGFloat(1 - glass))
+        islandFill.withAlphaComponent(CGFloat(1 - glass))
     }
 
-    static var solid: NSColor { dark ? .black : .white }
+    static var solid: NSColor { islandFill }
 
     static func poke() {
         NotificationCenter.default.post(name: changed, object: nil)
