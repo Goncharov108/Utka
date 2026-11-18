@@ -625,6 +625,7 @@ final class ShotChromeRoot: NSView {
 /// Отдельное окно. Скрытие островка его не закрывает. Touch Bar агенту не нужен: на этом Маке он роняет процесс при перерисовке.
 final class ShotWindow: NSWindow {
     var onUndo: (() -> Void)?
+    var onSave: (() -> Void)?
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -635,6 +636,10 @@ final class ShotWindow: NSWindow {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if flags == .command, event.keyCode == 6 {
             onUndo?()
+            return true
+        }
+        if flags == .command, event.keyCode == 1 {
+            onSave?()
             return true
         }
         return super.performKeyEquivalent(with: event)
@@ -892,6 +897,7 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.minSize = NSSize(width: 640, height: 360)
         window.onUndo = { [weak self] in self?.canvas.undo() }
+        window.onSave = { [weak self] in self?.saveTapped() }
         buildChrome(marks: marks)
     }
 
