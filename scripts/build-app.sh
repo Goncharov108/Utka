@@ -187,7 +187,7 @@ for arch in arm64 x86_64; do
     -o "$smc" \
     && swiftc -O -target "${arch}-apple-macosx13.3" \
     -import-objc-header "$ROOT/Sources/UtkaPlay.h" \
-    -framework AppKit -framework AVFoundation -framework ImageIO -framework CoreGraphics -framework CoreAudio -framework AudioToolbox -framework CoreFoundation -framework IOKit \
+    -framework AppKit -framework AVFoundation -framework ImageIO -framework CoreGraphics -framework CoreImage -framework CoreAudio -framework AudioToolbox -framework CoreFoundation -framework IOKit \
     "$play" \
     "$smc" \
     "$ROOT"/Sources/*.swift \

@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import ImageIO
 
 /// Точка пометки в пикселях картинки, сверху вниз.
@@ -91,7 +92,7 @@ struct ShotMark: Codable, Equatable {
 }
 
 enum ShotTool: Int {
-    case select, line, arrow, rect, pencil, text
+    case select, line, arrow, rect, pencil, blur, text
 }
 
 /// Последний цвет пометки между сессиями редактора.
@@ -166,11 +167,22 @@ enum ShotStore {
     }
 }
 
+/// CI для блюра пометок. Один на процесс.
+private let shotCIContext = CIContext(options: nil)
+
 /// Рисует снимок и пометки в прямоугольнике. Координаты пометок — пиксели картинки, сверху вниз.
 func drawShot(image: NSImage, imageSize: CGSize, marks: [ShotMark], in rect: CGRect, selected: String?) {
     let screen = NSGraphicsContext.current?.cgContext.convertToDeviceSpace(CGSize(width: 1, height: 1)).width ?? 2
     let shrinking = rect.width * screen + 0.5 < imageSize.width
     NSGraphicsContext.current?.imageInterpolation = shrinking ? .high : .none
+    if marks.contains(where: { $0.kind == "blur" }) {
+        var proposed = NSRect(origin: .zero, size: imageSize)
+        if let cg = image.cgImage(forProposedRect: &proposed, context: nil, hints: nil),
+           let flat = compositeShot(image: cg, marks: marks) {
+            drawImageUpright(NSImage(cgImage: flat, size: imageSize), in: rect)
+            return
+        }
+    }
     drawImageUpright(image, in: rect)
     drawMarks(marks, imageSize: imageSize, in: rect, selected: selected)
 }
@@ -190,11 +202,11 @@ func drawImageUpright(_ image: NSImage, in rect: NSRect) {
     ctx.restoreGraphicsState()
 }
 
-/// Только пометки. Контекст уже с осью игрек сверху вниз.
+/// Только пометки без блюра. Контекст уже с осью игрек сверху вниз.
 func drawMarks(_ marks: [ShotMark], imageSize: CGSize, in rect: CGRect, selected: String?) {
     let scale = rect.width / max(imageSize.width, 1)
     let width = max(1.25, imageSize.width * 0.003) * scale
-    for mark in marks {
+    for mark in marks where mark.kind != "blur" {
         let strong = mark.id == selected
         let ink = mark.ink.color
         strokeMark(path(for: mark, in: rect, imageSize: imageSize), width: strong ? width * 1.45 : width, color: ink)
@@ -217,21 +229,87 @@ func drawMarks(_ marks: [ShotMark], imageSize: CGSize, in rect: CGRect, selected
 
 /// Снимок с впечатанными пометками. Картинка остаётся как была, пометки сверху вниз.
 func flattenShot(image: CGImage, marks: [ShotMark]) -> Data? {
+    let flat = compositeShot(image: image, marks: marks) ?? image
+    let rep = NSBitmapImageRep(cgImage: flat)
+    return rep.representation(using: .png, properties: [:])
+}
+
+/// Собирает картинку и пометки по порядку. Блюр впечатывается в пиксели, остальное рисуется сверху.
+func compositeShot(image: CGImage, marks: [ShotMark]) -> CGImage? {
     let width = image.width
     let height = image.height
-    guard width > 0, height > 0, let rep = bitmap(width, height) else { return nil }
+    guard width > 0, height > 0 else { return nil }
     let size = NSSize(width: width, height: height)
-    rep.size = size
+    var current = image
+    var index = 0
+    while index < marks.count {
+        if marks[index].kind == "blur" {
+            if let next = applyBrushBlur(to: current, mark: marks[index], imageSize: size) {
+                current = next
+            }
+            index += 1
+            continue
+        }
+        guard let rep = bitmap(width, height) else { return current }
+        rep.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSGraphicsContext.current?.imageInterpolation = .high
+        let cg = NSGraphicsContext.current?.cgContext
+        cg?.draw(current, in: CGRect(x: 0, y: 0, width: width, height: height))
+        cg?.translateBy(x: 0, y: CGFloat(height))
+        cg?.scaleBy(x: 1, y: -1)
+        var batch: [ShotMark] = []
+        while index < marks.count, marks[index].kind != "blur" {
+            batch.append(marks[index])
+            index += 1
+        }
+        drawMarks(batch, imageSize: size, in: NSRect(origin: .zero, size: size), selected: nil)
+        NSGraphicsContext.restoreGraphicsState()
+        if let baked = rep.cgImage { current = baked }
+    }
+    return current
+}
+
+/// Мазок блюра: маска кисти + гаусс по текущей картинке.
+private func applyBrushBlur(to image: CGImage, mark: ShotMark, imageSize: CGSize) -> CGImage? {
+    let width = image.width
+    let height = image.height
+    let brush = max(8, CGFloat(mark.textSize))
+    guard let maskRep = bitmap(width, height) else { return nil }
+    maskRep.size = NSSize(width: width, height: height)
     NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-    NSGraphicsContext.current?.imageInterpolation = .high
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: maskRep)
     let cg = NSGraphicsContext.current?.cgContext
-    cg?.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
     cg?.translateBy(x: 0, y: CGFloat(height))
     cg?.scaleBy(x: 1, y: -1)
-    drawMarks(marks, imageSize: size, in: NSRect(origin: .zero, size: size), selected: nil)
+    let rect = NSRect(x: 0, y: 0, width: width, height: height)
+    let stroke = path(for: mark, in: rect, imageSize: imageSize)
+    NSColor.white.set()
+    if stroke.isEmpty, let origin = mark.points.first {
+        let center = place(origin, in: rect, imageSize: imageSize)
+        NSBezierPath(ovalIn: NSRect(x: center.x - brush / 2, y: center.y - brush / 2, width: brush, height: brush)).fill()
+    } else {
+        stroke.lineCapStyle = .round
+        stroke.lineJoinStyle = .round
+        stroke.lineWidth = brush
+        stroke.stroke()
+    }
     NSGraphicsContext.restoreGraphicsState()
-    return rep.representation(using: .png, properties: [:])
+    guard let maskCG = maskRep.cgImage else { return nil }
+    let input = CIImage(cgImage: image)
+    let blurred = input.clampedToExtent()
+        .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: brush * 0.45])
+        .cropped(to: input.extent)
+    let softMask = CIImage(cgImage: maskCG).clampedToExtent()
+        .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: max(1, brush * 0.12)])
+        .cropped(to: input.extent)
+    guard let filter = CIFilter(name: "CIBlendWithMask") else { return nil }
+    filter.setValue(blurred, forKey: kCIInputImageKey)
+    filter.setValue(input, forKey: kCIInputBackgroundImageKey)
+    filter.setValue(softMask, forKey: kCIInputMaskImageKey)
+    guard let output = filter.outputImage else { return nil }
+    return shotCIContext.createCGImage(output, from: input.extent)
 }
 
 private func bitmap(_ width: Int, _ height: Int) -> NSBitmapImageRep? {
@@ -281,7 +359,7 @@ private func path(for mark: ShotMark, in rect: CGRect, imageSize: CGSize) -> NSB
             height: abs(spots[1].y - spots[0].y)
         )
         path.appendRect(box)
-    case "pencil":
+    case "pencil", "blur":
         guard let first = spots.first else { return path }
         path.move(to: first)
         for spot in spots.dropFirst() { path.line(to: spot) }
@@ -344,9 +422,13 @@ func shotMarkHit(_ mark: ShotMark, point: CGPoint, slop: CGFloat) -> Bool {
             height: abs(spots[1].y - spots[0].y) + slop * 2
         )
         return box.contains(point)
-    case "pencil":
+    case "pencil", "blur":
+        let reach = mark.kind == "blur" ? max(slop, CGFloat(mark.textSize) * 0.5) : slop
+        if spots.count == 1 {
+            return hypot(point.x - spots[0].x, point.y - spots[0].y) <= reach
+        }
         guard spots.count >= 2 else { return false }
-        for index in 1..<spots.count where segmentDistance(point, spots[index - 1], spots[index]) <= slop {
+        for index in 1..<spots.count where segmentDistance(point, spots[index - 1], spots[index]) <= reach {
             return true
         }
         return false
@@ -369,7 +451,9 @@ final class ShotCanvasView: NSView, NSTextFieldDelegate {
     var tool: ShotTool = .select { didSet { needsDisplay = true } }
     var ink = ShotInk.white
     var fontStep = 1
-    var onStyle: ((ShotInk, Double) -> Void)?
+    var brushStep = 1
+    /// ink, textSize/кисть, kind выбранной пометки.
+    var onStyle: ((ShotInk, Double, String) -> Void)?
 
     private var selectedID: String?
     private var draft: ShotMark?
@@ -424,7 +508,7 @@ final class ShotCanvasView: NSView, NSTextFieldDelegate {
                 selectedID = mark.id
                 dragOrigin = point
                 dragOriginal = mark
-                onStyle?(mark.ink, mark.textSize)
+                onStyle?(mark.ink, mark.textSize, mark.kind)
             } else {
                 selectedID = nil
                 dragOrigin = nil
@@ -433,7 +517,8 @@ final class ShotCanvasView: NSView, NSTextFieldDelegate {
         case .text:
             beginText(at: viewPoint)
         default:
-            draft = ShotMark(id: UUID().uuidString, kind: kindName(tool), points: [ShotPoint(point)], text: "", textSize: textSize, ink: ink)
+            let size = tool == .blur ? brushSize : textSize
+            draft = ShotMark(id: UUID().uuidString, kind: kindName(tool), points: [ShotPoint(point)], text: "", textSize: size, ink: ink)
         }
         needsDisplay = true
     }
@@ -454,7 +539,7 @@ final class ShotCanvasView: NSView, NSTextFieldDelegate {
             if let index = marks.firstIndex(where: { $0.id == original.id }) {
                 marks[index] = moved
             }
-        case .pencil:
+        case .pencil, .blur:
             draft?.points.append(ShotPoint(point))
         case .line, .arrow, .rect:
             guard draft != nil else { return }
@@ -479,6 +564,8 @@ final class ShotCanvasView: NSView, NSTextFieldDelegate {
         draft = nil
         if ready.kind == "pencil" {
             guard ready.points.count >= 2 else { needsDisplay = true; return }
+        } else if ready.kind == "blur" {
+            guard !ready.points.isEmpty else { needsDisplay = true; return }
         } else if ready.points.count >= 2 {
             let start = ready.points[0].point
             let end = ready.points[1].point
@@ -552,17 +639,24 @@ final class ShotCanvasView: NSView, NSTextFieldDelegate {
 
     /// Доли ширины картинки. Палитра переключает ступень, не произвольное число.
     static let fontScales: [Double] = [0.018, 0.028, 0.042, 0.06]
+    /// Доли ширины для диаметра кисти блюра.
+    static let brushScales: [Double] = [0.012, 0.024, 0.042, 0.07]
 
     private var textSize: Double {
         let step = min(max(0, fontStep), Self.fontScales.count - 1)
         return max(18, imageSize.width * Self.fontScales[step])
     }
 
+    private var brushSize: Double {
+        let step = min(max(0, brushStep), Self.brushScales.count - 1)
+        return max(12, imageSize.width * Self.brushScales[step])
+    }
+
     /// Новый цвет. Если пометка выбрана, красит и её.
     func useInk(_ next: ShotInk) {
         ink = next
         guard let selectedID, let index = marks.firstIndex(where: { $0.id == selectedID }) else { return }
-        guard marks[index].ink != next else { return }
+        guard marks[index].kind != "blur", marks[index].ink != next else { return }
         pushUndo()
         marks[index].ink = next
         needsDisplay = true
@@ -573,6 +667,17 @@ final class ShotCanvasView: NSView, NSTextFieldDelegate {
         fontStep = min(max(0, step), Self.fontScales.count - 1)
         guard let selectedID, let index = marks.firstIndex(where: { $0.id == selectedID }), marks[index].kind == "text" else { return }
         let size = textSize
+        guard marks[index].textSize != size else { return }
+        pushUndo()
+        marks[index].textSize = size
+        needsDisplay = true
+    }
+
+    /// Новая величина кисти блюра. Выбранный мазок меняется сразу.
+    func useBrushStep(_ step: Int) {
+        brushStep = min(max(0, step), Self.brushScales.count - 1)
+        guard let selectedID, let index = marks.firstIndex(where: { $0.id == selectedID }), marks[index].kind == "blur" else { return }
+        let size = brushSize
         guard marks[index].textSize != size else { return }
         pushUndo()
         marks[index].textSize = size
@@ -617,6 +722,7 @@ final class ShotCanvasView: NSView, NSTextFieldDelegate {
         case .arrow: return "arrow"
         case .rect: return "rect"
         case .pencil: return "pencil"
+        case .blur: return "blur"
         case .text: return "text"
         }
     }
@@ -729,19 +835,27 @@ final class ShotStyleBar: NSView {
     }
 }
 
-/// Ступень размера рядом с кнопкой текста.
-final class ShotFontBar: NSView {
-    private var fontStep = 1
-    var onFont: ((Int) -> Void)?
+/// Ступень «− N +» на полосе: размер текста или кисти блюра.
+final class ShotStepBar: NSView {
+    private var step = 1
+    private let labels: [String]
+    var onStep: ((Int) -> Void)?
 
-    private static let labels = ["18", "28", "42", "60"]
     private static let stepHit: CGFloat = 22
     private static let labelWidth: CGFloat = 28
 
     var preferredWidth: CGFloat { Self.stepHit + Self.labelWidth + Self.stepHit }
 
-    func reflect(fontStep: Int) {
-        self.fontStep = fontStep
+    init(labels: [String]) {
+        self.labels = labels
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func reflect(step: Int) {
+        self.step = min(max(0, step), max(0, labels.count - 1))
         needsDisplay = true
     }
 
@@ -750,7 +864,8 @@ final class ShotFontBar: NSView {
         let labelBox = NSRect(x: minus.maxX, y: 0, width: Self.labelWidth, height: bounds.height)
         let plus = NSRect(x: labelBox.maxX, y: 0, width: Self.stepHit, height: bounds.height)
         drawBarSign("−", in: minus)
-        drawBarSign(Self.labels[min(fontStep, Self.labels.count - 1)], in: labelBox, size: 11)
+        let label = labels.isEmpty ? "—" : labels[min(step, labels.count - 1)]
+        drawBarSign(label, in: labelBox, size: 11)
         drawBarSign("+", in: plus)
     }
 
@@ -765,11 +880,11 @@ final class ShotFontBar: NSView {
     }
 
     private func shift(_ delta: Int) {
-        let next = min(ShotCanvasView.fontScales.count - 1, max(0, fontStep + delta))
-        guard next != fontStep else { return }
-        fontStep = next
+        let next = min(max(0, labels.count - 1), max(0, step + delta))
+        guard next != step else { return }
+        step = next
         needsDisplay = true
-        onFont?(next)
+        onStep?(next)
     }
 }
 
@@ -882,7 +997,8 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
     private var toolButtons: [NSButton] = []
     private var undoButton: NSButton!
     private let styleBar = ShotStyleBar()
-    private let fontBar = ShotFontBar()
+    private let fontBar = ShotStepBar(labels: ["18", "28", "42", "60"])
+    private let brushBar = ShotStepBar(labels: ["16", "32", "56", "90"])
     private let toolDivider = ShotBarDivider()
     private let actionDivider = ShotBarDivider()
     private let saveButton = SaveDiskButton()
@@ -944,16 +1060,25 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
         canvas.ink = ShotInk.palette[inkIndex]
         styleBar.reflect(inkIndex: inkIndex)
 
-        canvas.onStyle = { [weak self] ink, size in
+        canvas.onStyle = { [weak self] ink, size, kind in
             guard let self else { return }
             let ratio = size / Double(max(self.canvas.imageSize.width, 1))
+            if kind == "blur" {
+                let step = ShotCanvasView.brushScales.enumerated().min {
+                    abs($0.element - ratio) < abs($1.element - ratio)
+                }?.offset ?? self.canvas.brushStep
+                self.canvas.brushStep = step
+                self.brushBar.reflect(step: step)
+                return
+            }
+            self.canvas.ink = ink
+            self.styleBar.reflect(inkIndex: ShotInk.nearest(ink))
+            guard kind == "text" else { return }
             let step = ShotCanvasView.fontScales.enumerated().min {
                 abs($0.element - ratio) < abs($1.element - ratio)
             }?.offset ?? self.canvas.fontStep
-            self.canvas.ink = ink
             self.canvas.fontStep = step
-            self.styleBar.reflect(inkIndex: ShotInk.nearest(ink))
-            self.fontBar.reflect(fontStep: step)
+            self.fontBar.reflect(step: step)
         }
 
         bar.wantsLayer = true
@@ -963,6 +1088,7 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
             (.arrow, "arrow.up.right", "Стрелка"),
             (.rect, "rectangle", "Периметр"),
             (.pencil, "pencil.tip", "Карандаш"),
+            (.blur, "cloud.fog", "Блюр"),
             (.text, "textformat", "Текст")
         ]
         toolButtons = tools.map { tool, symbol, tip in
@@ -980,7 +1106,11 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
             ShotPrefs.lastInkIndex = index
             self?.canvas.useInk(ShotInk.palette[index])
         }
-        fontBar.onFont = { [weak self] step in self?.canvas.useFontStep(step) }
+        fontBar.onStep = { [weak self] step in self?.canvas.useFontStep(step) }
+        brushBar.onStep = { [weak self] step in self?.canvas.useBrushStep(step) }
+        brushBar.reflect(step: canvas.brushStep)
+        fontBar.reflect(step: canvas.fontStep)
+        bar.addSubview(brushBar)
         bar.addSubview(fontBar)
         bar.addSubview(toolDivider)
         bar.addSubview(styleBar)
@@ -1021,6 +1151,10 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
         for button in toolButtons {
             button.frame = NSRect(origin: NSPoint(x: x, y: 6), size: slot)
             x += 32
+            if button.tag == ShotTool.blur.rawValue {
+                brushBar.frame = NSRect(x: x - 4, y: 6, width: brushBar.preferredWidth, height: 28)
+                x = brushBar.frame.maxX + 4
+            }
             if button.tag == ShotTool.text.rawValue {
                 fontBar.frame = NSRect(x: x - 4, y: 6, width: fontBar.preferredWidth, height: 28)
                 x = fontBar.frame.maxX + 4
