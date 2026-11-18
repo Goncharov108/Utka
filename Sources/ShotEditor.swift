@@ -94,6 +94,22 @@ enum ShotTool: Int {
     case select, line, arrow, rect, pencil, text
 }
 
+/// Последний цвет пометки между сессиями редактора.
+enum ShotPrefs {
+    private static let inkKey = "shot.lastInkIndex"
+
+    /// Индекс в `ShotInk.palette`. Вне диапазона — белый.
+    static var lastInkIndex: Int {
+        get {
+            let raw = UserDefaults.standard.object(forKey: inkKey) as? Int ?? 0
+            return min(max(0, raw), ShotInk.palette.count - 1)
+        }
+        set {
+            UserDefaults.standard.set(min(max(0, newValue), ShotInk.palette.count - 1), forKey: inkKey)
+        }
+    }
+}
+
 /// Скрытые соседи PNG: чистые пиксели и пометки. Имена с точкой полка не подхватывает.
 enum ShotStore {
     static func discard(beside path: String) {
@@ -907,6 +923,7 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        ShotPrefs.lastInkIndex = ShotInk.nearest(canvas.ink)
         let done = onClose
         onClose = nil
         DispatchQueue.main.async { done?() }
@@ -923,6 +940,10 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
         canvas.image = picture
         canvas.imageSize = picture.size
         canvas.setMarks(marks)
+        let inkIndex = ShotPrefs.lastInkIndex
+        canvas.ink = ShotInk.palette[inkIndex]
+        styleBar.reflect(inkIndex: inkIndex)
+
         canvas.onStyle = { [weak self] ink, size in
             guard let self else { return }
             let ratio = size / Double(max(self.canvas.imageSize.width, 1))
@@ -956,6 +977,7 @@ final class ShotEditorController: NSObject, NSWindowDelegate {
 
         styleBar.onInk = { [weak self] index in
             guard ShotInk.palette.indices.contains(index) else { return }
+            ShotPrefs.lastInkIndex = index
             self?.canvas.useInk(ShotInk.palette[index])
         }
         fontBar.onFont = { [weak self] step in self?.canvas.useFontStep(step) }
